@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import axios from "axios";
 import { useParams, Link } from "react-router-dom";
 
-const API = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
 
 export default function ProjectEstimations() {
   const { projectId } = useParams();

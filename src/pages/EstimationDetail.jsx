@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-const API = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
 
 export default function EstimationDetail() {
   const { estimationId } = useParams();

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
 
-const API = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
 
 export default function Products() {
   const [categories, setCategories] = useState([]);
