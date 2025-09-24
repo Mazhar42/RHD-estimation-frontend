@@ -11,10 +11,10 @@ export default function EstimationDetail() {
   const { estimationId } = useParams();
   const [lines, setLines] = useState([]);
   const [items, setItems] = useState([]);
-  const [form, setForm] = useState({ item_id: "", sub_description: "", no_of_units: 1, length: "", width: "", thickness: "", quantity: "" });
   const [total, setTotal] = useState(0);
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isAddLineModalOpen, setIsAddLineModalOpen] = useState(false);
   const [editingLine, setEditingLine] = useState(null);
 
   useEffect(() => {
@@ -32,25 +32,6 @@ export default function EstimationDetail() {
     setLines(res.data);
     const tot = await axios.get(`${API}/estimations/${estimationId}/total`);
     setTotal(tot.data.grand_total);
-  };
-
-  const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
-
-  const addLine = async (e) => {
-    e.preventDefault();
-    if (!form.item_id) return;
-    const payload = {
-      item_id: parseInt(form.item_id),
-      sub_description: form.sub_description || null,
-      no_of_units: parseInt(form.no_of_units || 1),
-      length: form.length ? parseFloat(form.length) : null,
-      width: form.width ? parseFloat(form.width) : null,
-      thickness: form.thickness ? parseFloat(form.thickness) : null,
-      quantity: form.quantity ? parseFloat(form.quantity) : null
-    };
-    await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
-    setForm({ item_id: "", sub_description: "", no_of_units: 1, length: "", width: "", thickness: "", quantity: "" });
-    fetchLines();
   };
 
   const handleSelectLine = (lineId) => {
@@ -146,31 +127,26 @@ export default function EstimationDetail() {
     doc.save(`estimation_${estimationId}_lines.pdf`);
   };
 
-  console.log('lines:', lines);
+  const groupedLines = lines.reduce((acc, line) => {
+    const divisionName = line.item?.division?.name || 'Uncategorized';
+    if (!acc[divisionName]) {
+      acc[divisionName] = [];
+    }
+    acc[divisionName].push(line);
+    return acc;
+  }, {});
 
   return (
     <div className="p-4 bg-white rounded shadow">
       <h2 className="text-lg font-semibold mb-4">Estimation #{estimationId}</h2>
 
-      <form onSubmit={addLine} className="grid grid-cols-6 gap-2 mb-4">
-        <select name="item_id" value={form.item_id} onChange={handleChange} className="border p-2 rounded col-span-2">
-          <option value="">Select product</option>
-          {items.map(it => <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>)}
-        </select>
-        <input name="sub_description" value={form.sub_description} onChange={handleChange} placeholder="Sub description" className="border p-2 rounded col-span-2" />
-        <input name="no_of_units" value={form.no_of_units} onChange={handleChange} placeholder="No" className="border p-2 rounded col-span-1" />
-        <input name="quantity" value={form.quantity} onChange={handleChange} placeholder="Quantity (direct)" className="border p-2 rounded col-span-1" />
-
-        <input name="length" value={form.length} onChange={handleChange} placeholder="Length" className="border p-2 rounded col-span-1" />
-        <input name="width" value={form.width} onChange={handleChange} placeholder="Width" className="border p-2 rounded col-span-1" />
-        <input name="thickness" value={form.thickness} onChange={handleChange} placeholder="Thickness" className="border p-2 rounded col-span-1" />
-
-        <div className="col-span-6 text-right">
-          <button className="bg-green-600 text-white px-4 py-2 rounded">Add Line</button>
-        </div>
-      </form>
-
       <div className="my-4 flex gap-2">
+        <button
+          onClick={() => setIsAddLineModalOpen(true)}
+          className="bg-teal-600 text-white px-4 py-2 rounded"
+        >
+          Add Line
+        </button>
         <button
           onClick={handleDeleteSelected}
           disabled={selectedLineIds.length === 0}
@@ -181,80 +157,109 @@ export default function EstimationDetail() {
         <button
           onClick={openEditModal}
           disabled={selectedLineIds.length !== 1}
-          className="bg-blue-600 text-white px-4 py-2 rounded disabled:bg-gray-400"
+          className="bg-teal-600 text-white px-4 py-2 rounded disabled:bg-gray-400"
         >
           Edit
         </button>
         <button
           onClick={downloadXlsx}
           disabled={!lines.length}
-          className="bg-green-600 text-white px-4 py-2 rounded disabled:bg-gray-400"
+          className="bg-teal-600 text-white px-4 py-2 rounded disabled:bg-gray-400"
         >
           Download XLSX
         </button>
         <button
           onClick={downloadPdf}
           disabled={!lines.length}
-          className="bg-blue-600 text-white px-4 py-2 rounded disabled:bg-gray-400"
+          className="bg-teal-600 text-white px-4 py-2 rounded disabled:bg-gray-400"
         >
           Download PDF
         </button>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-left">
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-2 w-4">
-                <input
-                  type="checkbox"
-                  onChange={handleSelectAll}
-                  checked={lines.length > 0 && selectedLineIds.length === lines.length}
-                />
-              </th>
-              <th className="p-2">Item Code</th>
-              <th className="p-2">Description</th>
-              <th className="p-2">Sub Desc</th>
-              <th className="p-2">No.</th>
-              <th className="p-2">Length</th>
-              <th className="p-2">Width</th>
-              <th className="p-2">Thickness</th>
-              <th className="p-2">Quantity</th>
-              <th className="p-2">Calc Qty</th>
-              <th className="p-2">Rate</th>
-              <th className="p-2">Unit</th>
-              <th className="p-2">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map(l => (
-              <tr key={l.line_id} className={`border-b ${selectedLineIds.includes(l.line_id) ? 'bg-blue-100' : ''}`}>
-                <td className="p-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedLineIds.includes(l.line_id)}
-                    onChange={() => handleSelectLine(l.line_id)}
-                  />
-                </td>
-                <td className="p-2">{l.item?.item_code}</td>
-                <td className="p-2">{l.item?.item_description}</td>
-                <td className="p-2">{l.sub_description}</td>
-                <td className="p-2">{l.no_of_units}</td>
-                <td className="p-2">{l.length}</td>
-                <td className="p-2">{l.width}</td>
-                <td className="p-2">{l.thickness}</td>
-                <td className="p-2">{l.quantity}</td>
-                <td className="p-2">{l.calculated_qty}</td>
-                <td className="p-2">{l.rate}</td>
-                <td className="p-2">{l.item?.unit}</td>
-                <td className="p-2">{l.amount}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {Object.entries(groupedLines).map(([divisionName, divisionLines]) => {
+        const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+        return (
+          <div key={divisionName} className="mb-8">
+            <h3 className="text-md font-semibold mb-2 bg-gray-200 p-2 rounded">{divisionName}</h3>
+            <div className="border rounded-lg flex flex-col border-gray-200">
+              <div className="overflow-x-auto w-full">
+                <div className="max-h-[75vh] overflow-auto">
+                  <table className="min-w-full border-collapse table-fixed">
+                    <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
+                      <tr>
+                        <th className="p-2 w-4">
+                          <input
+                            type="checkbox"
+                            onChange={(e) => {
+                              const allLineIdsInDivision = divisionLines.map(l => l.line_id);
+                              if (e.target.checked) {
+                                setSelectedLineIds(prev => [...new Set([...prev, ...allLineIdsInDivision])]);
+                              } else {
+                                setSelectedLineIds(prev => prev.filter(id => !allLineIdsInDivision.includes(id)));
+                              }
+                            }}
+                            checked={divisionLines.every(l => selectedLineIds.includes(l.line_id))}
+                          />
+                        </th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Item Code</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Description</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Sub Desc</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">No.</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Length</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Width</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Thickness</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Quantity</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Calc Qty</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Rate</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Unit</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white">
+                      {divisionLines.map((l, i) => (
+                        <tr key={l.line_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors ${selectedLineIds.includes(l.line_id) ? 'bg-teal-100' : ''}`}>
+                          <td className="p-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedLineIds.includes(l.line_id)}
+                              onChange={() => handleSelectLine(l.line_id)}
+                            />
+                          </td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.item_code}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.item_description}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.sub_description}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.no_of_units}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.length}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.width}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.thickness}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.quantity}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.calculated_qty}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.rate}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.unit}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.amount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div className="text-right font-bold mt-2">Subtotal for {divisionName}: {divisionSubtotal.toFixed(2)}</div>
+          </div>
+        );
+      })}
 
-      <div className="text-right text-xl font-bold mt-4">Grand Total: {total}</div>
+      <div className="text-right text-xl font-bold mt-4">Grand Total: {total.toFixed(2)}</div>
+
+      {isAddLineModalOpen && (
+        <AddLineModal
+          items={items}
+          onClose={() => setIsAddLineModalOpen(false)}
+          onSave={fetchLines}
+          estimationId={estimationId}
+        />
+      )}
 
       {isEditModalOpen && (
         <EditLineModal
@@ -267,6 +272,54 @@ export default function EstimationDetail() {
   );
 }
 
+function AddLineModal({ items, onClose, onSave, estimationId }) {
+  const [form, setForm] = useState({ item_id: "", sub_description: "", no_of_units: 1, length: "", width: "", thickness: "", quantity: "" });
+
+  const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+
+  const addLine = async (e) => {
+    e.preventDefault();
+    if (!form.item_id) return;
+    const payload = {
+      item_id: parseInt(form.item_id),
+      sub_description: form.sub_description || null,
+      no_of_units: parseInt(form.no_of_units || 1),
+      length: form.length ? parseFloat(form.length) : null,
+      width: form.width ? parseFloat(form.width) : null,
+      thickness: form.thickness ? parseFloat(form.thickness) : null,
+      quantity: form.quantity ? parseFloat(form.quantity) : null
+    };
+    await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
+    onSave();
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg">
+        <h3 className="text-lg font-semibold mb-4">Add New Line</h3>
+        <form onSubmit={addLine}>
+          <div className="grid grid-cols-2 gap-4">
+            <select name="item_id" value={form.item_id} onChange={handleChange} className="border p-2 rounded col-span-2">
+              <option value="">Select product</option>
+              {items.map(it => <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>)}
+            </select>
+            <input name="sub_description" value={form.sub_description} onChange={handleChange} placeholder="Sub description" className="border p-2 rounded col-span-2" />
+            <input name="no_of_units" value={form.no_of_units} onChange={handleChange} placeholder="No" className="border p-2 rounded" />
+            <input name="quantity" value={form.quantity} onChange={handleChange} placeholder="Quantity (direct)" className="border p-2 rounded" />
+            <input name="length" value={form.length} onChange={handleChange} placeholder="Length" className="border p-2 rounded" />
+            <input name="width" value={form.width} onChange={handleChange} placeholder="Width" className="border p-2 rounded" />
+            <input name="thickness" value={form.thickness} onChange={handleChange} placeholder="Thickness" className="border p-2 rounded" />
+          </div>
+          <div className="mt-6 flex justify-end gap-4">
+            <button type="button" onClick={onClose} className="bg-gray-300 text-black px-4 py-2 rounded">Cancel</button>
+            <button type="submit" className="bg-teal-600 text-white px-4 py-2 rounded">Add Line</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 function EditLineModal({ line, onClose, onSave }) {
   const [editForm, setEditForm] = useState({
@@ -311,7 +364,7 @@ function EditLineModal({ line, onClose, onSave }) {
           </div>
           <div className="mt-6 flex justify-end gap-4">
             <button type="button" onClick={onClose} className="bg-gray-300 text-black px-4 py-2 rounded">Cancel</button>
-            <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded">Save Changes</button>
+            <button type="submit" className="bg-teal-600 text-white px-4 py-2 rounded">Save Changes</button>
           </div>
         </form>
       </div>

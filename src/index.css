@@ -1,1 +1,44 @@
 @import "tailwindcss";
+
+body {
+  font-family: 'Open Sans', sans-serif;
+}
+
+.product-master-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+.product-master-table thead tr {
+  background-color: #f8f9fa;
+  color: #333;
+  text-align: left;
+  font-weight: 600;
+}
+
+.product-master-table th,
+.product-master-table td {
+  padding: 12px 15px;
+  border-bottom: 1px solid #dee2e6;
+  vertical-align: middle;
+}
+
+.product-master-table tbody tr:nth-of-type(even) {
+  background-color: #f8f9fa;
+}
+
+.product-master-table tbody tr:hover {
+  background-color: #f1f3f5;
+}
+
+.product-master-table .actions .edit-btn {
+  color: #007bff;
+}
+
+.product-master-table .actions .delete-btn {
+  color: #dc3545;
+}
+
+
