@@ -87,35 +87,76 @@ export default function EstimationDetail() {
     const wb = XLSX.utils.book_new();
     const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0);
 
+    let aoa = [
+      ["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Calc Qty", "Rate", "Unit", "Amount"]
+    ];
+    const merges = [];
+    let currentRow = 0; // This is the row index in the 'aoa' array
+
+    // Style for bold text
+    const boldStyle = { font: { bold: true } };
+
+    currentRow++; // For header row
+
     Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
+      // Add division name row
+      aoa.push([divisionName]);
+      merges.push({ s: { r: currentRow, c: 0 }, e: { r: currentRow, c: 11 } });
+      currentRow++;
+
+      // Add line items
+      divisionLines.forEach(l => {
+        aoa.push([
+          l.item?.item_code, l.item?.item_description, l.sub_description,
+          l.no_of_units, l.length, l.width, l.thickness, l.quantity,
+          l.calculated_qty, l.rate, l.item?.unit, l.amount
+        ]);
+        currentRow++;
+      });
+
+      // Add subtotal row
       const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
-      const dataToExport = divisionLines.map(l => ({
-        "Item Code": l.item?.item_code,
-        "Description": l.item?.item_description,
-        "Sub Desc": l.sub_description,
-        "No.": l.no_of_units,
-        "Length": l.length,
-        "Width": l.width,
-        "Thickness": l.thickness,
-        "Quantity": l.quantity,
-        "Calc Qty": l.calculated_qty,
-        "Rate": l.rate,
-        "Unit": l.item?.unit,
-        "Amount": l.amount,
-      }));
+      aoa.push(["", "", "", "", "", "", "", "", "", "", "Subtotal", divisionSubtotal]);
+      currentRow++;
 
-      const ws = XLSX.utils.json_to_sheet(dataToExport);
-      XLSX.utils.sheet_add_aoa(ws, [[]], { origin: -1 }); // Add a blank row
-      XLSX.utils.sheet_add_aoa(ws, [["Subtotal", divisionSubtotal]], { origin: -1 });
-      XLSX.utils.book_append_sheet(wb, ws, divisionName.substring(0, 31)); // Sheet names must be <= 31 chars
+      // Add blank row
+      aoa.push([]);
+      currentRow++;
     });
-    
-    // Add a summary sheet
-    const summaryWs = XLSX.utils.aoa_to_sheet([
-      ["Grand Total", grandTotal]
-    ]);
-    XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
 
+    // Add grand total row
+    aoa.push(["", "", "", "", "", "", "", "", "", "", "Grand Total", grandTotal]);
+    
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!merges'] = merges;
+
+    // Apply styles by iterating through the worksheet
+    // Bold main headers
+    for (let C = 0; C <= 11; ++C) {
+      const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[cellAddress]) ws[cellAddress].s = boldStyle;
+    }
+
+    let styleRow = 1; // Start after main headers
+    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
+      // Bold and center division name
+      const divCellAddress = XLSX.utils.encode_cell({ r: styleRow, c: 0 });
+      if (ws[divCellAddress]) ws[divCellAddress].s = { ...boldStyle, alignment: { horizontal: "center" } };
+      styleRow++; // Move to first item row
+
+      styleRow += divisionLines.length; // Move to subtotal row
+
+      // Bold subtotal
+      const subtotalCellAddress = XLSX.utils.encode_cell({ r: styleRow, c: 11 });
+      if (ws[subtotalCellAddress]) ws[subtotalCellAddress].s = boldStyle;
+      styleRow += 2; // Move past subtotal and blank row to the next division header
+    });
+
+    // Bold grand total
+    const grandTotalCellAddress = XLSX.utils.encode_cell({ r: aoa.length - 1, c: 11 });
+    if (ws[grandTotalCellAddress]) ws[grandTotalCellAddress].s = boldStyle;
+
+    XLSX.utils.book_append_sheet(wb, ws, "Estimation");
     XLSX.writeFile(wb, `estimation_${estimationId}.xlsx`);
   };
 
