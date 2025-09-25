@@ -84,32 +84,55 @@ export default function EstimationDetail() {
   };
 
   const downloadXlsx = () => {
-    const dataToExport = lines.map(l => ({
-      "Item Code": l.item?.item_code,
-      "Description": l.item?.item_description,
-      "Sub Desc": l.sub_description,
-      "No.": l.no_of_units,
-      "Length": l.length,
-      "Width": l.width,
-      "Thickness": l.thickness,
-      "Quantity": l.quantity,
-      "Calc Qty": l.calculated_qty,
-      "Rate": l.rate,
-      "Unit": l.item?.unit,
-      "Amount": l.amount,
-    }));
-
-    const ws = XLSX.utils.json_to_sheet(dataToExport);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Estimation Lines");
-    XLSX.writeFile(wb, `estimation_${estimationId}_lines.xlsx`);
+    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0);
+
+    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
+      const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+      const dataToExport = divisionLines.map(l => ({
+        "Item Code": l.item?.item_code,
+        "Description": l.item?.item_description,
+        "Sub Desc": l.sub_description,
+        "No.": l.no_of_units,
+        "Length": l.length,
+        "Width": l.width,
+        "Thickness": l.thickness,
+        "Quantity": l.quantity,
+        "Calc Qty": l.calculated_qty,
+        "Rate": l.rate,
+        "Unit": l.item?.unit,
+        "Amount": l.amount,
+      }));
+
+      const ws = XLSX.utils.json_to_sheet(dataToExport);
+      XLSX.utils.sheet_add_aoa(ws, [[]], { origin: -1 }); // Add a blank row
+      XLSX.utils.sheet_add_aoa(ws, [["Subtotal", divisionSubtotal]], { origin: -1 });
+      XLSX.utils.book_append_sheet(wb, ws, divisionName.substring(0, 31)); // Sheet names must be <= 31 chars
+    });
+    
+    // Add a summary sheet
+    const summaryWs = XLSX.utils.aoa_to_sheet([
+      ["Grand Total", grandTotal]
+    ]);
+    XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
+
+    XLSX.writeFile(wb, `estimation_${estimationId}.xlsx`);
   };
 
   const downloadPdf = () => {
     const doc = new jsPDF();
-    autoTable(doc, {
-      head: [["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Calc Qty", "Rate", "Unit", "Amount"]],
-      body: lines.map(l => [
+    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0);
+    let isFirstTable = true;
+
+    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
+      if (!isFirstTable) {
+        doc.addPage();
+      }
+      isFirstTable = false;
+
+      doc.text(divisionName, 14, 15);
+      const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+      const body = divisionLines.map(l => [
         l.item?.item_code || '',
         l.item?.item_description || '',
         l.sub_description || '',
@@ -122,9 +145,23 @@ export default function EstimationDetail() {
         l.rate || '',
         l.item?.unit || '',
         l.amount || '',
-      ]),
+      ]);
+
+      autoTable(doc, {
+        startY: 20,
+        head: [["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Calc Qty", "Rate", "Unit", "Amount"]],
+        body: body,
+        foot: [['Subtotal', '', '', '', '', '', '', '', '', '', '', divisionSubtotal.toFixed(2)]],
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [22, 160, 133] },
+      });
     });
-    doc.save(`estimation_${estimationId}_lines.pdf`);
+    
+    // Add grand total
+    const finalY = doc.lastAutoTable.finalY || 10;
+    doc.text(`Grand Total: ${grandTotal.toFixed(2)}`, 14, finalY + 10);
+
+    doc.save(`estimation_${estimationId}.pdf`);
   };
 
   const groupedLines = lines.reduce((acc, line) => {
