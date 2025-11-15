@@ -4,6 +4,11 @@ body {
   font-family: 'Open Sans', sans-serif;
 }
 
+/* Scoped font for Item Master components */
+.item-master-font {
+  font-family: "Salesforce Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
 .product-master-table {
   border-collapse: collapse;
   width: 100%;
