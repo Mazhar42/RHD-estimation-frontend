@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { FaPlus, FaTrash, FaEdit, FaFileExcel, FaFileCsv, FaUpload, FaFilePdf } from "react-icons/fa";
 import axios from "axios";
+import { listDivisions } from "../api/items";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -32,6 +33,8 @@ export default function EstimationDetail() {
   const [importMode, setImportMode] = useState("append");
   const [importBanner, setImportBanner] = useState(null); // { type: 'success'|'warning'|'error', message: string }
   const downloadMenuRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [isImportDragging, setIsImportDragging] = useState(false);
   const estimationTitle = localStorage.getItem(`estimationName:${estimationId}`) || `Estimation #${estimationId}`;
 
   const submitImportLines = async () => {
@@ -43,8 +46,8 @@ export default function EstimationDetail() {
       setIsImporting(true);
       const filename = importFile.name || '';
       const ext = filename.split('.').pop()?.toLowerCase() || '';
-      if (ext !== 'xlsx' && ext !== 'xlsm') {
-        setImportError('Only .xlsx files are allowed.');
+      if (!['xlsx','xlsm','csv'].includes(ext)) {
+        setImportError('Only .xlsx or .csv files are allowed.');
         setIsImporting(false);
         return;
       }
@@ -53,14 +56,24 @@ export default function EstimationDetail() {
         const allIds = lines.map(l => l.line_id);
         await axios.delete(`${API}/estimations/lines`, { data: { line_ids: allIds } });
       }
-
-      const reader = new FileReader();
-      const fileArrayBuffer = await new Promise((resolve, reject) => {
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsArrayBuffer(importFile);
-      });
-      const wb = XLSX.read(fileArrayBuffer, { type: 'array' });
+      let wb;
+      if (ext === 'csv') {
+        const reader = new FileReader();
+        const fileText = await new Promise((resolve, reject) => {
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsText(importFile);
+        });
+        wb = XLSX.read(fileText, { type: 'string' });
+      } else {
+        const reader = new FileReader();
+        const fileArrayBuffer = await new Promise((resolve, reject) => {
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsArrayBuffer(importFile);
+        });
+        wb = XLSX.read(fileArrayBuffer, { type: 'array' });
+      }
       const sheetName = wb.SheetNames[0];
       const ws = wb.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false });
@@ -218,6 +231,15 @@ export default function EstimationDetail() {
       setIsImporting(false);
       setImportBanner({ type: 'error', message: msg });
     }
+  };
+
+  const handleImportClick = async () => {
+    if (!importFile) {
+      setImportError('Select a CSV or XLSX file to enable Import.');
+      if (fileInputRef.current) fileInputRef.current.click();
+      return;
+    }
+    await submitImportLines();
   };
 
   // Auto-hide banner after a while
@@ -557,6 +579,25 @@ export default function EstimationDetail() {
     doc.save(`estimation_${estimationId}.pdf`);
   };
 
+  // Download a single line's attachment (base64 stored on the line)
+  const downloadAttachment = (line) => {
+    const b64 = line?.attachment_base64;
+    const name = line?.attachment_name || `attachment_${line?.line_id || ''}`;
+    if (!b64) return;
+    try {
+      // Create a data URL and trigger download. Use generic binary mime.
+      const a = document.createElement('a');
+      a.href = `data:application/octet-stream;base64,${b64}`;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (e) {
+      console.error('Failed to download attachment', e);
+      alert('Failed to download attachment.');
+    }
+  };
+
   const groupedLines = lines.reduce((acc, line) => {
     const divisionName = line.item?.division?.name || 'Uncategorized';
     if (!acc[divisionName]) {
@@ -738,6 +779,7 @@ export default function EstimationDetail() {
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Calc Qty</th>
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Rate</th>
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Unit</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Attachment</th>
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Amount</th>
                       </tr>
                     </thead>
@@ -762,6 +804,20 @@ export default function EstimationDetail() {
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.calculated_qty}</td>
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.rate}</td>
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.unit}</td>
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">
+                            {l.attachment_name ? (
+                              <span className="inline-flex items-center gap-2">
+                                <span className="font-medium">{l.attachment_name}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => downloadAttachment(l)}
+                                  className="px-2 py-1 rounded text-white bg-gradient-to-r from-rose-500 to-pink-600 hover:from-rose-600 hover:to-pink-700"
+                                >
+                                  Download
+                                </button>
+                              </span>
+                            ) : '—'}
+                          </td>
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.amount}</td>
                         </tr>
                       ))}
@@ -790,6 +846,7 @@ export default function EstimationDetail() {
       {isAddLineModalOpen && (
         <AddLineModal
           items={items}
+          lines={lines}
           onClose={() => setIsAddLineModalOpen(false)}
           onSave={fetchLines}
           estimationId={estimationId}
@@ -832,7 +889,7 @@ export default function EstimationDetail() {
 
       {isImportModalOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50" role="dialog" aria-modal="true">
-          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-lg z-50 relative border border-gray-200">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
             <button
               type="button"
               onClick={() => setIsImportModalOpen(false)}
@@ -844,7 +901,99 @@ export default function EstimationDetail() {
               </svg>
             </button>
             <h3 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Import Estimation Lines</h3>
-            <p className="text-xs text-gray-600 mb-0">Temporarily disabled while fixing a build error. Close to continue.</p>
+            <p className="text-xs text-gray-600 mb-4">Upload a CSV or XLSX containing estimation lines. Choose whether to replace existing lines or add on top.</p>
+            <div className="space-y-4">
+              <div className="space-y-3">
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+                  onChange={(e) => { setImportFile(e.target.files[0] || null); setImportError(""); setIsImportDragging(false); }}
+                  ref={fileInputRef}
+                  id="importLinesFileInput"
+                  className="hidden"
+                />
+                <div
+                  onClick={() => !isImporting && fileInputRef.current && fileInputRef.current.click()}
+                  onDragOver={(e) => { e.preventDefault(); setIsImportDragging(true); }}
+                  onDragLeave={() => setIsImportDragging(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+                    if (f) { setImportFile(f); setImportError(""); }
+                    setIsImportDragging(false);
+                  }}
+                  className={`border-2 rounded-lg p-5 text-center cursor-pointer transition shadow-sm ${isImportDragging ? 'border-indigo-400 bg-indigo-50' : 'border-dashed border-gray-300 bg-gray-50 hover:bg-gray-100'} ${importError ? 'border-red-400 bg-red-50' : ''}`}
+                >
+                  <div className="flex flex-col items-center gap-2">
+                    <FaUpload className="w-6 h-6 text-gray-600" />
+                    {!importFile ? (
+                      <>
+                        <div className="text-sm text-gray-800">Click to choose a file or drag & drop</div>
+                        <div className="text-xs text-gray-500">Accepted: .csv, .xlsx</div>
+                      </>
+                    ) : (
+                      <div className="text-sm text-gray-800">Selected: <span className="font-medium">{importFile.name}</span></div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex justify-between items-center">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                    disabled={isImporting}
+                    className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} inline-flex items-center gap-2 px-3 py-2 bg-gray-800 text-white rounded-md text-xs hover:bg-gray-900`}
+                  >
+                    <FaUpload className="w-3 h-3" />
+                    <span>Browse files</span>
+                  </button>
+                  {importFile && (
+                    <button
+                      type="button"
+                      onClick={() => { setImportFile(null); setImportError(""); }}
+                      disabled={isImporting}
+                      className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} text-xs text-gray-700 hover:text-gray-900 underline`}
+                    >
+                      Remove selection
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-6">
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="importModeLines" value="append" checked={importMode === 'append'} onChange={(e) => setImportMode(e.target.value)} />
+                  <span>Add on top (append)</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="importModeLines" value="replace" checked={importMode === 'replace'} onChange={(e) => setImportMode(e.target.value)} />
+                  <span>Replace existing lines</span>
+                </label>
+              </div>
+              <div className="flex items-center justify-between">
+                {importError && (
+                  <div className="text-sm text-red-600">{importError}</div>
+                )}
+                {!importFile && !importError && (
+                  <div className="text-xs text-gray-500">Select a file to import</div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsImportModalOpen(false)}
+                  disabled={isImporting}
+                  className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-indigo-600 text-indigo-700 hover:bg-indigo-50 font-semibold text-sm py-1 px-4 rounded-md`}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleImportClick}
+                  disabled={isImporting}
+                  className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 text-white font-semibold text-sm py-1 px-6 rounded-md`}
+                >
+                  {isImporting ? 'Importing…' : 'Import'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -855,29 +1004,98 @@ export default function EstimationDetail() {
 
 // NOTE: Import modal temporarily rendered inline above to bypass a parser error.
 
-function AddLineModal({ items, onClose, onSave, estimationId, region }) {
+function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
   const [form, setForm] = useState({ item_id: "", sub_description: "", no_of_units: 1, length: "", width: "", thickness: "", quantity: "" });
   const [keepOpen, setKeepOpen] = useState(true);
   const [presets, setPresets] = useState([]);
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [presetName, setPresetName] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+
+  // Division-first selection state: fetch all divisions from backend so "Special Item" is visible
+  const [divisions, setDivisions] = useState([]);
+  useEffect(() => {
+    const fetchDivisions = async () => {
+      try {
+        const res = await listDivisions();
+        const list = (res || []).map(d => ({ id: d.division_id ?? d.id, name: d.name }));
+        setDivisions(list);
+      } catch (e) {
+        console.error('Failed to fetch divisions', e);
+      }
+    };
+    fetchDivisions();
+  }, []);
+  const [selectedDivisionId, setSelectedDivisionId] = useState("");
+
+  // Unit and unit-based input rules
+  const [selectedUnit, setSelectedUnit] = useState("");
+  const [unitMode, setUnitMode] = useState("default"); // 'default' | 'quantity' for units that support both
+  // Special Item attachment state
+  const [attachmentName, setAttachmentName] = useState("");
+  const [attachmentBase64, setAttachmentBase64] = useState("");
+  const [selectedFileName, setSelectedFileName] = useState("");
+  const fileInputRef = useRef(null);
 
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
   const addLine = async (e) => {
     e.preventDefault();
     if (!form.item_id) return;
+    // Determine allowed fields by unit
+    const allowed = allowedInputsForUnit(selectedUnit, unitMode);
+    const sanitize = (key, val) => (allowed.includes(key) ? val : null);
+    // Determine selected division name from fetched divisions
+    const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name || "";
+    // Enforce attachment requirements for Special Item
+    if (selectedDivisionName === 'Special Item') {
+      if (!attachmentBase64) {
+        setSubmitError('Attachment is required for Special Item.');
+        return;
+      }
+    }
+    // Generate unique attachment name if missing or duplicate
+    const existingNames = (lines || []).map(l => l.attachment_name).filter(Boolean);
+    const formatName = (n) => `A-${String(n).padStart(2,'0')}`;
+    const nextUniqueName = () => {
+      let n = 1;
+      while (existingNames.includes(formatName(n))) n++;
+      return formatName(n);
+    };
+    let finalAttachmentName = (attachmentName || '').trim();
+    if (selectedDivisionName === 'Special Item') {
+      if (!finalAttachmentName) {
+        finalAttachmentName = nextUniqueName();
+      } else if (existingNames.includes(finalAttachmentName)) {
+        // If user-provided name collides, auto-bump to next free
+        finalAttachmentName = nextUniqueName();
+      }
+    }
     const payload = {
       item_id: parseInt(form.item_id),
       sub_description: form.sub_description || null,
-      no_of_units: parseInt(form.no_of_units || 1),
-      length: form.length ? parseFloat(form.length) : null,
-      width: form.width ? parseFloat(form.width) : null,
-      thickness: form.thickness ? parseFloat(form.thickness) : null,
-      quantity: form.quantity ? parseFloat(form.quantity) : null
+      no_of_units: sanitize('no_of_units', parseInt(form.no_of_units || 1)),
+      length: sanitize('length', form.length ? parseFloat(form.length) : null),
+      width: sanitize('width', form.width ? parseFloat(form.width) : null),
+      thickness: sanitize('thickness', form.thickness ? parseFloat(form.thickness) : null),
+      quantity: sanitize('quantity', form.quantity ? parseFloat(form.quantity) : null),
+      // Attachments only for Special Item division
+      attachment_name: selectedDivisionName === 'Special Item' && attachmentBase64 ? finalAttachmentName : null,
+      attachment_base64: selectedDivisionName === 'Special Item' && attachmentBase64 ? attachmentBase64 : null,
     };
-    await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
-    onSave();
+    try {
+      setIsSubmitting(true);
+      setSubmitError("");
+      await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
+      onSave();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || 'Failed to add line. Please check inputs.';
+      setSubmitError(msg);
+      return;
+    } finally {
+      setIsSubmitting(false);
+    }
     // remember last template for this item + region
     try {
       localStorage.setItem(`lastLineByItem:${region}:${form.item_id}` , JSON.stringify(form));
@@ -915,6 +1133,12 @@ function AddLineModal({ items, onClose, onSave, estimationId, region }) {
       setPresets(all[form.item_id] || []);
     } catch { setPresets([]); }
   }, [form.item_id, region]);
+
+  // When division changes, clear item selection
+  useEffect(() => {
+    setForm(f => ({ ...f, item_id: "" }));
+    setSelectedUnit("");
+  }, [selectedDivisionId]);
 
   const applyLastForItem = () => {
     try {
@@ -963,6 +1187,33 @@ function AddLineModal({ items, onClose, onSave, estimationId, region }) {
     });
   };
 
+  // Allowed input rules by unit
+  const supportsDualMode = (unit) => {
+    const u = String(unit || '').toLowerCase();
+    const norm = u.replace(/[^a-z0-9]/g, '');
+    const isCubic = norm.includes('cumeter') || norm.includes('m3') || norm.includes('cubic');
+    const isSquare = norm.includes('sqmeter') || norm.includes('sqm') || norm.includes('m2') || norm.includes('square');
+    return isCubic || isSquare;
+  };
+  const allowedInputsForUnit = (unit, mode) => {
+    const u = String(unit || '').toLowerCase();
+    const norm = u.replace(/[^a-z0-9]/g, '');
+    const isCubic = norm.includes('cumeter') || norm.includes('m3') || norm.includes('cubic');
+    const isSquare = norm.includes('sqmeter') || norm.includes('sqm') || norm.includes('m2') || norm.includes('square');
+    const isLinear = !isCubic && !isSquare && (norm.includes('linm') || norm.includes('rm') || norm.includes('meter'));
+    if (isCubic) {
+      return mode === 'quantity' ? ['no_of_units','quantity'] : ['no_of_units','length','width','thickness'];
+    } else if (isSquare) {
+      return mode === 'quantity' ? ['no_of_units','quantity'] : ['no_of_units','length','width'];
+    } else if (isLinear) {
+      return ['no_of_units','length'];
+    } else {
+      return ['no_of_units','quantity'];
+    }
+  };
+
+  const allowedInputs = allowedInputsForUnit(selectedUnit, unitMode);
+
   return (
     <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
       <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
@@ -974,10 +1225,50 @@ function AddLineModal({ items, onClose, onSave, estimationId, region }) {
           <p className="mb-3 text-xs text-gray-600">Showing items for region: <span className="font-medium">{region}</span></p>
         )}
         <form id="add-line-form" onSubmit={addLine} className="grid grid-cols-1 gap-3 mt-2">
-          <select name="item_id" value={form.item_id} onChange={handleChange} className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs">
-            <option value="">Select Item</option>
-            {items.map(it => <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>)}
+          {/* Division first */}
+          <select value={selectedDivisionId} onChange={(e)=>setSelectedDivisionId(e.target.value)} className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs">
+            <option value="">Select Division</option>
+            {divisions.map(d => (
+              <option key={d.id} value={d.id}>{d.name}</option>
+            ))}
           </select>
+          {/* Item filtered by division */}
+          <select
+            name="item_id"
+            value={form.item_id}
+            onChange={(e)=>{
+              const id = e.target.value;
+              setForm({ ...form, item_id: id });
+              const it = items.find(x => String(x.item_id) === String(id));
+              const unit = it?.unit || "";
+              setSelectedUnit(unit);
+              setUnitMode(supportsDualMode(unit) ? 'default' : 'default');
+            }}
+            disabled={!selectedDivisionId}
+            className={`border ${!selectedDivisionId ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
+          >
+            <option value="">Select Item</option>
+            {items
+              .filter(it => String(it.division_id) === String(selectedDivisionId))
+              .map(it => (
+                <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>
+              ))}
+          </select>
+          {/* Unit + mode */}
+          {form.item_id && (
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <div className="text-gray-800"><span className="font-semibold text-sm">Unit:</span> <span className="font-bold text-sm">{selectedUnit || '—'}</span></div>
+              {supportsDualMode(selectedUnit) && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-600">Calculation:</span>
+                  <div className="inline-flex rounded overflow-hidden border border-gray-300">
+                    <button type="button" className={`px-2 py-1 ${unitMode==='default'?'bg-teal-600 text-white':'bg-white text-gray-700'}`} onClick={()=>setUnitMode('default')}>Dimensions</button>
+                    <button type="button" className={`px-2 py-1 ${unitMode==='quantity'?'bg-teal-600 text-white':'bg-white text-gray-700'}`} onClick={()=>setUnitMode('quantity')}>Quantity</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {form.item_id && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 items-end">
               <div className="flex items-center gap-2">
@@ -996,12 +1287,77 @@ function AddLineModal({ items, onClose, onSave, estimationId, region }) {
               </div>
             </div>
           )}
-          <input name="sub_description" value={form.sub_description} onChange={handleChange} placeholder="Sub description" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
-          <input name="no_of_units" value={form.no_of_units} onChange={handleChange} placeholder="No. of units" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
-          <input name="quantity" value={form.quantity} onChange={handleChange} placeholder="Quantity (direct)" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
-          <input name="length" value={form.length} onChange={handleChange} placeholder="Length" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
-          <input name="width" value={form.width} onChange={handleChange} placeholder="Width" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
-          <input name="thickness" value={form.thickness} onChange={handleChange} placeholder="Thickness" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+          <input name="sub_description" value={form.sub_description} onChange={handleChange} placeholder="Sub Division / Sub Description" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+
+          {/* Inputs governed by unit rules */}
+          {allowedInputs.includes('no_of_units') && (
+            <input name="no_of_units" value={form.no_of_units} onChange={handleChange} placeholder="Nos" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+          )}
+          {allowedInputs.includes('quantity') && (
+            <input name="quantity" value={form.quantity} onChange={handleChange} placeholder="Quantity" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+          )}
+          {allowedInputs.includes('length') && (
+            <input name="length" value={form.length} onChange={handleChange} placeholder="Length" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+          )}
+          {allowedInputs.includes('width') && (
+            <input name="width" value={form.width} onChange={handleChange} placeholder="Width" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+          )}
+          {allowedInputs.includes('thickness') && (
+            <input name="thickness" value={form.thickness} onChange={handleChange} placeholder="Thickness/Depth" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
+          )}
+          {/* Attachment inputs for Special Item division */}
+          {(() => {
+            const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name;
+            if (selectedDivisionName === 'Special Item') {
+              return (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                  <input
+                    type="text"
+                    value={attachmentName}
+                    onChange={(e)=>setAttachmentName(e.target.value)}
+                    placeholder="Attachment Name (e.g., A-01)"
+                    className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                  />
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="*/*"
+                      onChange={(e)=>{
+                        const file = e.target.files?.[0];
+                        if (!file) { setAttachmentBase64(''); setSelectedFileName(''); return; }
+                        setSelectedFileName(file.name);
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          const result = reader.result;
+                          if (typeof result === 'string') {
+                            const b64 = result.includes(',') ? result.split(',')[1] : result;
+                            setAttachmentBase64(b64);
+                          }
+                        };
+                        reader.readAsDataURL(file);
+                      }}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                      className="text-xs px-3 py-2 rounded bg-gradient-to-r from-rose-500 to-pink-600 text-white hover:from-rose-600 hover:to-pink-700"
+                    >
+                      Upload Attachment
+                    </button>
+                    <span className="text-[11px] text-gray-600 truncate max-w-[160px]" title={selectedFileName}>
+                      {selectedFileName || 'No file selected'}
+                    </span>
+                  </div>
+                </div>
+              );
+            }
+            return null;
+          })()}
+          {submitError && (
+            <div className="text-xs text-red-600">{submitError}</div>
+          )}
           <div className="mt-2 flex justify-between items-center gap-3">
             <label className="flex items-center gap-2 text-xs text-gray-700">
               <input type="checkbox" checked={keepOpen} onChange={(e)=>setKeepOpen(e.target.checked)} />
@@ -1016,9 +1372,10 @@ function AddLineModal({ items, onClose, onSave, estimationId, region }) {
             </button>
             <button
               type="submit"
-              className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs"
+              disabled={isSubmitting}
+              className={`${isSubmitting ? 'opacity-70 cursor-not-allowed' : ''} bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs`}
             >
-              Add Line
+              {isSubmitting ? 'Adding…' : 'Add Line'}
             </button>
           </div>
         </form>
@@ -1174,6 +1531,19 @@ function LineDetailModal({ line, onClose }) {
           <div><span className="text-gray-600">Division:</span> {line?.item?.division?.name || '—'}</div>
           <div><span className="text-gray-600">Rate:</span> {line?.rate} {line?.item?.unit ? `(${line?.item?.unit})` : ''}</div>
           <div><span className="text-gray-600">Sub description:</span> {line?.sub_description || '—'}</div>
+          {line?.attachment_name && (
+            <div className="flex items-center gap-2">
+              <span className="text-gray-600">Attachment:</span>
+              <span className="font-medium">{line.attachment_name}</span>
+              <a
+                href={`data:application/octet-stream;base64,${line.attachment_base64}`}
+                download={line.attachment_name}
+                className="px-2 py-1 rounded text-white bg-gradient-to-r from-rose-500 to-pink-600 hover:from-rose-600 hover:to-pink-700"
+              >
+                Download
+              </a>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <div><span className="text-gray-600">No. of units:</span> {line?.no_of_units ?? '—'}</div>
             <div><span className="text-gray-600">Quantity (direct):</span> {line?.quantity ?? '—'}</div>

@@ -1,31 +1,31 @@
 import React, { useEffect, useState, useRef } from "react";
 import axios from "axios";
-import { FaEdit, FaTrash, FaChevronDown, FaPlus, FaUpload } from "react-icons/fa";
+import { listOrganizations, listRegions, createRegion, deleteRegion, createOrganization, deleteOrganization } from "../api/orgs";
+import { FaEdit, FaTrash, FaPlus, FaUpload } from "react-icons/fa";
 
 const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
-const REGION_OPTIONS = [
-  "Dhaka Zone",
-  "Mymensingh Zone",
-  "Cumilla Zone",
-  "Sylhet Zone",
-  "Khulna Zone",
-  "Barisal Zone",
-  "Gopalganj Zone",
-  "Rajshahi Zone",
-  "Rangpur Zone",
-  "Chattogram Zone",
-];
 
 export default function Products() {
   const [isAddDivisionModalOpen, setIsAddDivisionModalOpen] = useState(false);
   const [isAddItemModalOpen, setIsAddItemModalOpen] = useState(false);
   const [divisions, setDivisions] = useState([]);
+  const [organizations, setOrganizations] = useState([]);
+  const [selectedOrg, setSelectedOrg] = useState(null); // {org_id, name}
+  const [orgRegionObjs, setOrgRegionObjs] = useState([]); // [{region_id,name,organization_id}]
+  const orgRegions = React.useMemo(() => orgRegionObjs.map(r => r.name), [orgRegionObjs]);
+  const [isManageRegionsOpen, setIsManageRegionsOpen] = useState(false);
+  const [newRegionName, setNewRegionName] = useState("");
+  const [addRegionError, setAddRegionError] = useState("");
+  const [isManageOrganizationsOpen, setIsManageOrganizationsOpen] = useState(false);
+  const [newOrgName, setNewOrgName] = useState("");
+  const [addOrgError, setAddOrgError] = useState("");
   const [items, setItems] = useState([]);
   const [divisionName, setDivisionName] = useState("");
-  const [form, setForm] = useState({ item_code: "", item_description: "", unit: "", rate: "", division_id: "", region: "" });
+  const makeInitialRegionRates = React.useCallback((regions) => Object.fromEntries((regions || []).map(r => [r, ""])), []);
+  const [form, setForm] = useState({ item_code: "", item_description: "", unit: "", division_id: "", organization: "", regionRates: {} });
   const [editItem, setEditItem] = useState(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [search, setSearch] = useState({ division: "", code: "", description: "", unit: "", rate: "", rateOperator: "==", region: "" });
+  const [search, setSearch] = useState({ division: "", code: "", description: "", unit: "", rate: "", rateOperator: "==", region: "", organization: "" });
   const [uniqueUnits, setUniqueUnits] = useState([]);
   const [isAddingNewUnit, setIsAddingNewUnit] = useState(false);
   const [newUnit, setNewUnit] = useState("");
@@ -34,14 +34,19 @@ export default function Products() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [importMode, setImportMode] = useState("append");
   const [importFile, setImportFile] = useState(null);
+  // Export option removed permanently
+  // Safety: define removed export menu states to avoid stray references
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
-  const [exportFocusedIndex, setExportFocusedIndex] = useState(0);
   const exportMenuContainerRef = useRef(null);
-  const exportMenuRef = useRef(null);
   const [isImportDragging, setIsImportDragging] = useState(false);
   const [isMassDeleteModalOpen, setIsMassDeleteModalOpen] = useState(false);
   const [isMassDeleting, setIsMassDeleting] = useState(false);
   const massDeleteContainerRef = useRef(null);
+  // Multi-condition filters (AND) for mass delete
+  const [massFilters, setMassFilters] = useState([
+    { column: 'division', operator: 'equals', value: '' },
+  ]);
+  const [massFilterJoin, setMassFilterJoin] = useState('AND'); // 'AND' | 'OR'
   const [massFilterColumn, setMassFilterColumn] = useState("division");
   const [massFilterOperator, setMassFilterOperator] = useState("equals");
   const [massFilterValue, setMassFilterValue] = useState("");
@@ -69,13 +74,14 @@ export default function Products() {
       search.unit ||
       search.rate ||
       search.region ||
+      search.organization ||
       (search.rateOperator && search.rateOperator !== '==')
     );
   };
 
   // Clear all search filters to defaults
   const clearAllSearch = () => {
-    setSearch({ division: "", code: "", description: "", unit: "", rate: "", rateOperator: "==", region: "" });
+    setSearch({ division: "", code: "", description: "", unit: "", rate: "", rateOperator: "==", region: "", organization: "" });
     setCurrentPage(1);
   };
 
@@ -87,8 +93,49 @@ export default function Products() {
 
   useEffect(() => {
     fetchDivisions();
-    fetchItems();
+    // Load organizations and regions (default to RHD if available), then fetch items scoped to org
+    (async () => {
+      try {
+        const orgs = await listOrganizations();
+        setOrganizations(orgs);
+        const defaultOrg = orgs.find(o => o.name === "RHD") || orgs[0] || null;
+        setSelectedOrg(defaultOrg);
+        if (defaultOrg) {
+          const regs = await listRegions(defaultOrg.org_id);
+          setOrgRegionObjs(regs);
+          setForm(f => ({ ...f, organization: defaultOrg.name, regionRates: makeInitialRegionRates(regs.map(r => r.name)) }));
+          await fetchItems(defaultOrg.name);
+        } else {
+          await fetchItems();
+        }
+      } catch (e) {
+        console.error("Failed to load organizations/regions", e);
+      }
+    })();
   }, []);
+
+  const changeOrganization = async (orgId) => {
+    const org = organizations.find(o => String(o.org_id) === String(orgId)) || null;
+    setSelectedOrg(org);
+    if (!org) {
+      setOrgRegionObjs([]);
+      setForm(f => ({ ...f, organization: "", regionRates: {} }));
+      return;
+    }
+    try {
+      const regs = await listRegions(org.org_id);
+      setOrgRegionObjs(regs);
+      setForm(f => ({ ...f, organization: org.name, regionRates: makeInitialRegionRates(regs.map(r => r.name)) }));
+      await fetchItems(org.name);
+    } catch (e) {
+      console.error("Failed to load regions", e);
+    }
+  };
+
+  // Keep form regionRates in sync if orgRegions change while modal is open
+  useEffect(() => {
+    setForm(f => ({ ...f, regionRates: makeInitialRegionRates(orgRegions) }));
+  }, [orgRegions, makeInitialRegionRates]);
 
   useEffect(() => {
     const units = [...new Set(items.map(item => item.unit))];
@@ -96,9 +143,9 @@ export default function Products() {
   }, [items]);
 
   useEffect(() => {
-    const regions = [...new Set(items.map(item => item.region).filter(Boolean))];
+    const regions = orgRegions.length ? orgRegions : [...new Set(items.map(item => item.region === 'Cumilla Zone' ? 'Comilla Zone' : item.region).filter(Boolean))];
     setUniqueRegions(regions);
-  }, [items]);
+  }, [items, orgRegions]);
 
   // Keyboard shortcuts for Add Division modal: Esc to cancel, Enter to add
   useEffect(() => {
@@ -166,6 +213,38 @@ export default function Products() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isConfirmDeleteItemOpen, confirmDeleteItemId]);
 
+  // Keyboard shortcuts for Manage Regions modal: Esc to cancel, Enter to add
+  useEffect(() => {
+    if (!isManageRegionsOpen) return;
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setIsManageRegionsOpen(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        handleAddRegion();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isManageRegionsOpen, newRegionName, selectedOrg]);
+
+  // Keyboard shortcuts for Manage Organizations modal: Esc to cancel, Enter to add
+  useEffect(() => {
+    if (!isManageOrganizationsOpen) return;
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setIsManageOrganizationsOpen(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        handleAddOrganization();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isManageOrganizationsOpen, newOrgName]);
+
   // Keyboard shortcuts for Import Item modal: Esc to cancel, Enter to import, Arrows toggle mode
   useEffect(() => {
     if (!isImportModalOpen) return;
@@ -225,52 +304,17 @@ export default function Products() {
     };
   }, [isMassDeleteModalOpen, isMassDeleteConfirmOpen, massFilterValue]);
 
-  // Keyboard navigation and outside click for Export menu
-  useEffect(() => {
-    if (!isExportMenuOpen) return;
-    const onKeyDown = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setIsExportMenuOpen(false);
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setExportFocusedIndex((i) => (i + 1) % 2);
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setExportFocusedIndex((i) => (i + 2 - 1) % 2);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        // 0 = CSV, 1 = XLSX
-        if (exportFocusedIndex === 0) {
-          setIsExportMenuOpen(false);
-          exportCSV();
-        } else {
-          setIsExportMenuOpen(false);
-          exportXLSX();
-        }
-      }
-    };
-    const onMouseDown = (e) => {
-      const container = exportMenuContainerRef.current;
-      if (container && !container.contains(e.target)) {
-        setIsExportMenuOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("mousedown", onMouseDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("mousedown", onMouseDown);
-    };
-  }, [isExportMenuOpen, exportFocusedIndex]);
+  // Export menu removed
 
   const fetchDivisions = async () => {
     const res = await axios.get(`${API}/items/divisions`);
     setDivisions(res.data);
   };
-  const fetchItems = async () => {
-    // Request a larger limit so the UI reflects full imports
-    const res = await axios.get(`${API}/items`, { params: { limit: 10000 } });
+  const fetchItems = async (organizationName) => {
+    // Request a larger limit so the UI reflects full imports; include organization filter if provided
+    const params = { limit: 10000 };
+    if (organizationName) params.organization = organizationName;
+    const res = await axios.get(`${API}/items`, { params });
     setItems(res.data);
   };
 
@@ -279,7 +323,8 @@ export default function Products() {
       setAddDivisionError("Input field is empty");
       return;
     }
-    await axios.post(`${API}/items/divisions`, { name: divisionName.trim() });
+    const payload = { name: divisionName.trim(), organization_id: selectedOrg?.org_id };
+    await axios.post(`${API}/items/divisions`, payload);
     setDivisionName("");
     setAddDivisionError("");
     fetchDivisions();
@@ -289,21 +334,48 @@ export default function Products() {
   };
 
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+  const handleRegionRateChange = (region, value) => {
+    setForm((prev) => ({ ...prev, regionRates: { ...prev.regionRates, [region]: value } }));
+  };
+
+  const divisionsForOrg = React.useMemo(() => {
+    // Divisions are now common across organizations; show all divisions
+    return divisions;
+  }, [divisions]);
 
   const addItem = async (e) => {
     if (e?.preventDefault) e.preventDefault();
-    const requiredMissing = !form.division_id || !form.item_code.trim() || !form.item_description.trim() || !form.unit || !form.region;
+    const hasAtLeastOneRate = Object.values(form.regionRates).some(v => String(v).trim() !== "");
+    const requiredMissing = !form.division_id || !form.item_code.trim() || !form.item_description.trim() || !form.unit || !hasAtLeastOneRate;
     if (requiredMissing) {
-      setAddItemError("Input field is empty");
+      if (orgRegions.length === 0) {
+        setAddItemError(`No regions for ${form.organization || selectedOrg?.name || "organization"}. Add a region first.`);
+      } else {
+        setAddItemError(!hasAtLeastOneRate ? "Provide at least one region rate" : "Input field is empty");
+      }
       return;
     }
-    const payload = { ...form, rate: form.rate ? parseFloat(form.rate) : null, division_id: parseInt(form.division_id) };
-    await axios.post(`${API}/items`, payload);
-    setForm({ item_code: "", item_description: "", unit: "", rate: "", division_id: "", region: "" });
+    const base = {
+      item_code: form.item_code.trim(),
+      item_description: form.item_description.trim(),
+      unit: form.unit,
+      division_id: parseInt(form.division_id, 10),
+      organization: form.organization || "RHD",
+    };
+  const payloads = orgRegions
+      .filter((region) => String(form.regionRates[region] || '').trim() !== '')
+      .map((region) => ({ ...base, rate: parseFloat(form.regionRates[region]), region }));
+    try {
+      await Promise.all(payloads.map(p => axios.post(`${API}/items`, p)));
+    } catch (err) {
+      setAddItemError("Failed to add one or more region rates");
+      return;
+    }
+  setForm({ item_code: "", item_description: "", unit: "", division_id: "", organization: selectedOrg?.name || "", regionRates: makeInitialRegionRates(orgRegions) });
     setAddItemError("");
-    fetchItems();
+    fetchItems(selectedOrg?.name);
     setIsAddItemModalOpen(false);
-    setToast("Item added successfully");
+    setToast("Item(s) added successfully");
     setTimeout(() => setToast(null), 2500);
   };
 
@@ -328,6 +400,43 @@ export default function Products() {
   const requestDeleteItem = (item_id) => {
     setConfirmDeleteItemId(item_id);
     setIsConfirmDeleteItemOpen(true);
+  };
+
+  // Add region/org handlers to support keyboard Enter and reuse in buttons
+  const handleAddRegion = async () => {
+    if (!newRegionName.trim()) { setAddRegionError('Input field is empty'); return; }
+    if (!selectedOrg?.org_id) { setAddRegionError('Select an organization first'); return; }
+    try {
+      await createRegion(selectedOrg.org_id, newRegionName.trim());
+      const regs = await listRegions(selectedOrg.org_id);
+      setOrgRegionObjs(regs);
+      setForm(f => ({ ...f, regionRates: makeInitialRegionRates(regs.map(r => r.name)) }));
+      setNewRegionName('');
+      setAddRegionError('');
+      setIsManageRegionsOpen(false);
+      setToast('Region added successfully');
+      setTimeout(() => setToast(null), 2500);
+    } catch (e) {
+      setAddRegionError('Region already exists or failed to add');
+    }
+  };
+
+  const handleAddOrganization = async () => {
+    if (!newOrgName.trim()) { setAddOrgError('Input field is empty'); return; }
+    try {
+      await createOrganization(newOrgName.trim());
+      const orgs = await listOrganizations();
+      setOrganizations(orgs);
+      const created = orgs.find(o => o.name.toLowerCase() === newOrgName.trim().toLowerCase());
+      if (created) await changeOrganization(created.org_id);
+      setNewOrgName('');
+      setAddOrgError('');
+      setIsManageOrganizationsOpen(false);
+      setToast('Organization added successfully');
+      setTimeout(() => setToast(null), 2500);
+    } catch (e) {
+      setAddOrgError('Organization already exists or failed to add');
+    }
   };
 
   const deleteItemById = async () => {
@@ -359,43 +468,38 @@ export default function Products() {
     await axios.put(`${API}/items/${editItem.item_id}`, payload);
     setEditItem(null);
     setIsEditModalOpen(false);
-    fetchItems();
+    fetchItems(selectedOrg?.name);
   };
 
   const deleteItem = async (item_id) => {
     await axios.delete(`${API}/items/${item_id}`);
-    fetchItems();
+    fetchItems(selectedOrg?.name);
   };
 
   const exportCSV = async () => {
-    const res = await axios.get(`${API}/items/export.csv`, { responseType: 'blob' });
-    const url = window.URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+    // Generate template CSV with headers only (no data)
+    const headers = [
+      "SI. No",
+      "Item Code",
+      "Division",
+      "Description",
+      "Unit",
+      ...orgRegions,
+      "Organization",
+    ];
+    const csv = headers.join(",") + "\n"; // headers row only
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', 'ItemMaster.csv');
+    link.setAttribute('download', 'ItemMasterTemplate.csv');
     document.body.appendChild(link);
     link.click();
     link.remove();
     window.URL.revokeObjectURL(url);
   };
 
-  const exportXLSX = async () => {
-    try {
-      const res = await axios.get(`${API}/items/export.xlsx`, { responseType: 'blob' });
-      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', 'ItemMaster.xlsx');
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.warn('XLSX export failed, falling back to CSV:', err);
-      alert('XLSX export is not available on the server. Downloading CSV instead.');
-      await exportCSV();
-    }
-  };
+  // XLSX export removed along with Export menu
 
   const submitImport = async () => {
     if (!importFile) {
@@ -407,7 +511,7 @@ export default function Products() {
       const formData = new FormData();
       formData.append('file', importFile);
       await axios.post(`${API}/items/import?mode=${importMode}`, formData);
-      await fetchItems();
+      await fetchItems(selectedOrg?.name);
       setIsImportModalOpen(false);
       setImportFile(null);
       setImportError("");
@@ -475,7 +579,7 @@ export default function Products() {
       case 'rate':
         return item.rate;
       case 'region':
-        return item.region ?? '';
+        return (item.region === 'Cumilla Zone' ? 'Comilla Zone' : item.region) ?? '';
       default:
         return '';
     }
@@ -484,10 +588,10 @@ export default function Products() {
   const isStringColumn = (col) => ['division', 'code', 'description', 'unit', 'region'].includes(col);
   const isNumberColumn = (col) => ['rate'].includes(col);
 
-  const massFilterMatches = (item) => {
-    const col = massFilterColumn;
-    const op = massFilterOperator;
-    const val = massFilterValue;
+  const matchesSingleFilter = (item, f) => {
+    const col = f.column;
+    const op = f.operator;
+    const val = f.value;
     if (!val && val !== 0) return false;
     const v = getColumnValue(item, col);
     if (isStringColumn(col)) {
@@ -516,9 +620,17 @@ export default function Products() {
     }
     return false;
   };
+  const massFilterMatches = (item) => {
+    if (!massFilters || massFilters.length === 0) return false;
+    if (massFilterJoin === 'OR') {
+      return massFilters.some(f => matchesSingleFilter(item, f));
+    }
+    // AND by default
+    return massFilters.every(f => matchesSingleFilter(item, f));
+  };
 
   const massFilteredItems = items.filter(massFilterMatches);
-  const isMassFilterActive = massFilterValue !== '';
+  const isMassFilterActive = Array.isArray(massFilters) && massFilters.some(f => String(f.value).trim() !== '');
   const deleteCandidates = isMassFilterActive ? massFilteredItems : filteredItems;
 
   const bulkDeleteFiltered = async () => {
@@ -595,22 +707,53 @@ export default function Products() {
     }
   };
 
+  // Group items by Division + Code to pivot rates across regions
+  const groupedMap = new Map();
+  for (const it of items) {
+    const key = `${it.division_id}|${it.item_code}`;
+    if (!groupedMap.has(key)) {
+      groupedMap.set(key, {
+        division: it.division,
+        division_id: it.division_id,
+        item_code: it.item_code,
+        item_description: it.item_description,
+        unit: it.unit,
+        organization: it.organization || "RHD",
+        rates: {},
+      });
+    }
+    const normalizedRegion = it.region === 'Cumilla Zone' ? 'Comilla Zone' : it.region;
+    groupedMap.get(key).rates[normalizedRegion] = it.rate;
+  }
+  const groupedRows = Array.from(groupedMap.values());
+  const groupedFilteredRows = groupedRows.filter(row => (
+    (!search.division || (row.division?.name || '').toLowerCase().includes(search.division.toLowerCase())) &&
+    (!search.code || row.item_code.toLowerCase().includes(search.code.toLowerCase())) &&
+    (!search.description || row.item_description.toLowerCase().includes(search.description.toLowerCase())) &&
+    (!search.unit || row.unit === search.unit) &&
+    (!search.organization || (row.organization || '').toLowerCase().includes(search.organization.toLowerCase()))
+  ));
   const indexOfLastItem = currentPage * itemsPerPage;
   const indexOfFirstItem = indexOfLastItem - itemsPerPage;
-  const currentItems = filteredItems.slice(indexOfFirstItem, indexOfLastItem);
-  const totalPages = Math.ceil(filteredItems.length / itemsPerPage);
-  const showingStart = filteredItems.length ? indexOfFirstItem + 1 : 0;
-  const showingEnd = Math.min(indexOfLastItem, filteredItems.length);
+  const currentItems = groupedFilteredRows.slice(indexOfFirstItem, indexOfLastItem);
+  const totalPages = Math.ceil(groupedFilteredRows.length / itemsPerPage);
+  const showingStart = groupedFilteredRows.length ? indexOfFirstItem + 1 : 0;
+  const showingEnd = Math.min(indexOfLastItem, groupedFilteredRows.length);
 
   // Make table fill viewport and scroll internally
   const tableScrollRef = useRef(null);
   const bottomPaginationRef = useRef(null);
   const [tableScrollHeight, setTableScrollHeight] = useState(null);
+  // Single-select grouped row (Division + Code)
+  const [selectedGroupKey, setSelectedGroupKey] = useState(null);
+  const [isEditGroupModalOpen, setIsEditGroupModalOpen] = useState(false);
+  const [editGroupForm, setEditGroupForm] = useState(null);
   // Row selection state
   const [selectedItemIds, setSelectedItemIds] = useState([]);
   const [isItemDetailOpen, setIsItemDetailOpen] = useState(false);
   const [detailItem, setDetailItem] = useState(null);
   const [isDeleteSelectedConfirmOpen, setIsDeleteSelectedConfirmOpen] = useState(false);
+  const [isConfirmDeleteGroupOpen, setIsConfirmDeleteGroupOpen] = useState(false);
   // Mass delete progress state
   const [massDeleteTotal, setMassDeleteTotal] = useState(0);
   const [massDeleteCompleted, setMassDeleteCompleted] = useState(0);
@@ -619,7 +762,7 @@ export default function Products() {
   const toggleSelectItem = (id) => {
     setSelectedItemIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   };
-  const clearSelection = () => setSelectedItemIds([]);
+  const clearSelection = () => { setSelectedItemIds([]); setSelectedGroupKey(null); };
   const currentPageItemIds = () => currentItems.map(it => it.item_id).filter(Boolean);
   const toggleSelectAllCurrent = () => {
     const ids = currentPageItemIds();
@@ -652,6 +795,97 @@ export default function Products() {
     }
   };
 
+  // Helpers for grouped selection
+  const parseGroupKey = (key) => {
+    if (!key) return { division_id: null, item_code: null };
+    const [divStr, code] = key.split('|');
+    return { division_id: parseInt(divStr, 10), item_code: code };
+  };
+  const getItemsForGroup = (key) => {
+    const { division_id, item_code } = parseGroupKey(key);
+    return items.filter(it => String(it.division_id) === String(division_id) && String(it.item_code) === String(item_code));
+  };
+  const beginEditSelectedGroup = () => {
+    if (!selectedGroupKey) return;
+    const groupItems = getItemsForGroup(selectedGroupKey);
+    if (groupItems.length === 0) return;
+    const any = groupItems[0];
+  const rates = Object.fromEntries(orgRegions.map(r => [r, '']));
+    for (const it of groupItems) {
+      const r = it.region === 'Cumilla Zone' ? 'Comilla Zone' : it.region;
+      rates[r] = it.rate ?? '';
+    }
+    setEditGroupForm({
+      division_id: any.division_id,
+      item_code: any.item_code,
+      item_description: any.item_description,
+      unit: any.unit,
+      organization: any.organization || 'RHD',
+      regionRates: rates,
+    });
+    setIsEditGroupModalOpen(true);
+  };
+  const saveEditGroup = async () => {
+    if (!editGroupForm) return;
+    const base = {
+      item_code: editGroupForm.item_code.trim(),
+      item_description: editGroupForm.item_description.trim(),
+      unit: editGroupForm.unit,
+      division_id: parseInt(editGroupForm.division_id, 10),
+      organization: editGroupForm.organization || 'RHD',
+    };
+    const groupItems = getItemsForGroup(`${base.division_id}|${base.item_code}`);
+    try {
+      const ops = [];
+  for (const region of orgRegions) {
+        const val = editGroupForm.regionRates[region];
+        const normalized = region;
+        const existing = groupItems.find(it => (it.region === normalized || (normalized === 'Comilla Zone' && it.region === 'Cumilla Zone')));
+        if (existing) {
+          ops.push(axios.put(`${API}/items/${existing.item_id}`, { ...base, rate: val !== '' && val != null ? parseFloat(val) : null, region: existing.region }));
+        } else if (String(val).trim() !== '') {
+          ops.push(axios.post(`${API}/items`, { ...base, rate: parseFloat(val), region: normalized }));
+        }
+      }
+      await Promise.all(ops);
+      setIsEditGroupModalOpen(false);
+      setEditGroupForm(null);
+      await fetchItems();
+      setToast('Grouped item updated successfully');
+      setTimeout(() => setToast(null), 2500);
+    } catch (err) {
+      console.error('Grouped update failed:', err);
+      const msg = err?.response?.data?.detail || 'Failed to update grouped item.';
+      setToast(msg);
+      setTimeout(() => setToast(null), 3000);
+    }
+  };
+  const requestDeleteSelectedGroup = () => {
+    if (!selectedGroupKey) return;
+    setIsConfirmDeleteGroupOpen(true);
+  };
+
+  const deleteSelectedGroup = async () => {
+    if (!selectedGroupKey) return;
+    const groupItems = getItemsForGroup(selectedGroupKey);
+    if (groupItems.length === 0) { setIsConfirmDeleteGroupOpen(false); return; }
+    try {
+      const results = await Promise.allSettled(groupItems.map(it => axios.delete(`${API}/items/${it.item_id}`)));
+      const succeeded = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.length - succeeded;
+      await fetchItems();
+      clearSelection();
+      setIsConfirmDeleteGroupOpen(false);
+      setToast(`Deleted ${succeeded} rate(s). Failed ${failed}.`);
+      setTimeout(() => setToast(null), 3000);
+    } catch (err) {
+      console.error('Grouped delete failed:', err);
+      const msg = err?.response?.data?.detail || 'Failed to delete grouped item.';
+      setToast(msg);
+      setTimeout(() => setToast(null), 3000);
+    }
+  };
+
   // Keyboard: Item Detail ESC closes; Edit modal ESC closes, Enter saves; Delete-selected confirm ESC cancels, Enter confirms
   useEffect(() => {
     const onKey = (e) => {
@@ -671,6 +905,17 @@ export default function Products() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isItemDetailOpen, isEditModalOpen, isDeleteSelectedConfirmOpen, updateItem]);
+
+  // Keyboard shortcuts for Confirm Delete Group: Esc to cancel, Enter to delete
+  useEffect(() => {
+    if (!isConfirmDeleteGroupOpen) return;
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); setIsConfirmDeleteGroupOpen(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); deleteSelectedGroup(); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isConfirmDeleteGroupOpen, selectedGroupKey]);
 
   useEffect(() => {
     const computeHeight = () => {
@@ -698,56 +943,57 @@ export default function Products() {
       )}
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-xl font-semibold">Item Master</h2>
-        <div className="flex gap-2">
-          <button onClick={() => setIsAddDivisionModalOpen(true)} className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1">
+        <div className="flex gap-2 items-center">
+          <div className="flex items-center gap-2 mr-2">
+            <label className="text-xs text-emerald-700 font-semibold">Organization:</label>
+            <select
+              className="border border-gray-300 h-6 px-3 rounded text-xs"
+              value={selectedOrg?.org_id || ""}
+              onChange={(e) => changeOrganization(e.target.value)}
+            >
+              <option value="">Select</option>
+              {organizations.map(o => (
+                <option key={o.org_id} value={o.org_id}>{o.name}</option>
+              ))}
+            </select>
+          </div>
+          <button onClick={() => setIsAddDivisionModalOpen(true)} className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight h-6 px-4 rounded inline-flex items-center gap-1">
             <FaPlus className="w-3 h-3" />
             <span>Add Division</span>
           </button>
-          <button onClick={() => setIsAddItemModalOpen(true)} className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1">
+          <button onClick={() => setIsAddItemModalOpen(true)} className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-extralight h-6 px-4 rounded inline-flex items-center gap-1">
             <FaPlus className="w-3 h-3" />
             <span>Add Item</span>
           </button>
-          <div className="relative inline-block" ref={exportMenuContainerRef}>
-            <div className="flex shadow-sm">
-              <button
-                onClick={() => { setIsExportMenuOpen(!isExportMenuOpen); setExportFocusedIndex(0); }}
-                className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white text-xs font-medium py-1 px-4 rounded-l"
-              >
-                Export
-              </button>
-              <button
-                onClick={() => { setIsExportMenuOpen(!isExportMenuOpen); setExportFocusedIndex(0); }}
-                className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white font-medium py-1 px-2 rounded-r"
-              >
-                <FaChevronDown />
-              </button>
-            </div>
-            {isExportMenuOpen && (
-              <div className="absolute right-0 mt-2 w-44 bg-white border border-teal-200 rounded-md shadow-lg z-20" ref={exportMenuRef}>
-                <button
-                  onClick={() => { setIsExportMenuOpen(false); exportCSV(); }}
-                  className={`block w-full text-left px-4 py-2 text-sm text-teal-800 ${exportFocusedIndex === 0 ? 'bg-teal-50' : ''}`}
-                >
-                  Export CSV
-                </button>
-                <button
-                  onClick={() => { setIsExportMenuOpen(false); exportXLSX(); }}
-                  className={`block w-full text-left px-4 py-2 text-sm text-teal-800 ${exportFocusedIndex === 1 ? 'bg-teal-50' : ''}`}
-                >
-                  Export XLSX
-                </button>
-              </div>
-            )}
-          </div>
+          <button
+            onClick={() => setIsManageRegionsOpen(true)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsManageRegionsOpen(true); } }}
+            className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 text-xs font-medium h-6 px-3 rounded inline-flex items-center gap-1"
+            aria-haspopup="dialog"
+          >
+            <FaPlus className="w-3 h-3" />
+            <span>Manage Regions</span>
+          </button>
+          <button
+            onClick={() => setIsManageOrganizationsOpen(true)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsManageOrganizationsOpen(true); } }}
+            className="bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-medium h-6 px-3 rounded inline-flex items-center gap-1"
+            aria-haspopup="dialog"
+          >
+            <FaPlus className="w-3 h-3" />
+            <span>Manage Orgs</span>
+          </button>
+          {/* Export option removed permanently */}
           <button
             onClick={() => setIsImportModalOpen(true)}
-            className="bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 text-white text-xs font-medium py-1 px-4 rounded shadow-sm"
+            className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-medium h-6 px-4 rounded shadow-sm inline-flex items-center gap-1"
           >
-            Import Item
+            <FaUpload className="w-3 h-3" />
+            <span>Import Item</span>
           </button>
           <button
             onClick={() => setIsMassDeleteModalOpen(true)}
-            className="bg-white border border-blue-600 text-blue-700 hover:bg-blue-50 text-xs font-medium py-1 px-4 rounded shadow-sm"
+            className="bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-medium h-6 px-4 rounded shadow-sm inline-flex items-center gap-1"
           >
             Mass Delete
           </button>
@@ -802,7 +1048,7 @@ export default function Products() {
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
             <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Add New Item</h2>
-            <p className="text-xs text-gray-600 mb-3">Fill in item details including division, unit, and region.</p>
+            <p className="text-xs text-gray-600 mb-3">Fill in item details including division, unit, and multi-region rates.</p>
             {addItemError && (
               <p className="mb-3 text-sm text-red-600">{addItemError}</p>
             )}
@@ -819,10 +1065,10 @@ export default function Products() {
                 </button>
                 {isDivisionDropdownOpen && (
                   <div className="absolute mt-1 w-full bg-white border border-gray-200 rounded shadow z-50 max-h-48 overflow-auto">
-                    {divisions.length === 0 && (
+                    {divisionsForOrg.length === 0 && (
                       <div className="px-3 py-2 text-xs text-gray-500">No divisions</div>
                     )}
-                    {divisions.map(d => (
+                    {divisionsForOrg.map(d => (
                       <div key={d.division_id} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50 cursor-pointer">
                         <button type="button" className="text-left flex-1 text-xs" onClick={() => { setForm({ ...form, division_id: d.division_id }); setIsDivisionDropdownOpen(false); }}>
                           {d.name}
@@ -891,24 +1137,34 @@ export default function Products() {
                 placeholder="Item Description"
                 className={`border ${addItemError && !form.item_description.trim() ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 focus:ring-teal-500'} p-3 rounded-lg w-full focus:outline-none focus:ring-2 text-xs`}
               />
-              <input
-                name="rate"
-                value={form.rate}
-                onChange={handleChange}
-                placeholder="Rate"
-                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
-              />
-              <select
-                name="region"
-                value={form.region}
-                onChange={handleChange}
-                className={`border ${addItemError && !form.region ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 focus:ring-teal-500'} p-3 rounded-lg w-full focus:outline-none focus:ring-2 text-xs`}
-              >
-                <option value="">Select Region…</option>
-                {REGION_OPTIONS.map((r) => (
-                  <option key={r} value={r}>{r}</option>
+              <div className="grid grid-cols-1 gap-2">
+                <div className="text-xs text-gray-600">Organization (default)</div>
+                <input
+                  name="organization"
+                  value={form.organization}
+                  readOnly
+                  className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none text-xs bg-gray-100"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                {orgRegions.map((r) => (
+                  <div key={r} className="flex items-center gap-2">
+                    <label className="text-[11px] text-gray-700 whitespace-nowrap">{r}</label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      step="0.01"
+                      value={form.regionRates[r]}
+                      onChange={(e) => handleRegionRateChange(r, e.target.value)}
+                      placeholder="Rate"
+                      className="border border-gray-300 p-2 rounded w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                    />
+                  </div>
                 ))}
-              </select>
+                {orgRegions.length === 0 && (
+                  <div className="text-xs text-gray-600">No regions defined for {form.organization || selectedOrg?.name || "organization"}. Use Manage Regions to add.</div>
+                )}
+              </div>
               <div className="flex justify-end gap-3 mt-2">
                 <button
                   type="button"
@@ -919,7 +1175,8 @@ export default function Products() {
                 </button>
                 <button
                   type="submit"
-                  className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs"
+                  disabled={orgRegions.length === 0}
+                  className={`${orgRegions.length === 0 ? 'bg-gray-300 cursor-not-allowed' : 'bg-teal-700 hover:bg-teal-900'} text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs`}
                 >
                   <FaPlus className="w-3 h-3" />
                   <span>Add Item</span>
@@ -952,6 +1209,115 @@ export default function Products() {
         </div>
       )}
 
+      {isManageRegionsOpen && (
+        <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-md z-50 relative border border-gray-200">
+            <button onClick={() => setIsManageRegionsOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <h2 className="text-xl font-semibold mb-3 text-gray-900">Manage Regions</h2>
+            <p className="text-xs text-gray-600 mb-3">Add zones for the selected organization.</p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-600">Organization</label>
+                <input className="border border-gray-300 p-2 rounded w-full text-xs bg-gray-100" readOnly value={selectedOrg?.name || ''} />
+              </div>
+              <div className="max-h-40 overflow-auto border border-gray-200 rounded p-2">
+                {orgRegionObjs.length === 0 ? (
+                  <div className="text-xs text-gray-500">No regions</div>
+                ) : (
+                  orgRegionObjs.map(r => (
+                    <div key={r.region_id} className="flex items-center justify-between text-xs py-1">
+                      <span>{r.name}</span>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await deleteRegion(r.region_id);
+                            const regs = await listRegions(selectedOrg.org_id);
+                            setOrgRegionObjs(regs);
+                            setForm(f => ({ ...f, regionRates: makeInitialRegionRates(regs.map(rr => rr.name)) }));
+                          } catch (e) {
+                            console.error('Failed to delete region', e);
+                          }
+                        }}
+                        className="text-red-600 hover:text-red-800"
+                      >Delete</button>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div>
+                <label className="text-xs text-gray-600">New Region Name</label>
+                <input
+                  className={`border ${addRegionError ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 focus:ring-teal-500'} p-2 rounded w-full text-xs`}
+                  placeholder="e.g., Dhaka Zone"
+                  value={newRegionName}
+                  onChange={(e) => { setNewRegionName(e.target.value); if (addRegionError && e.target.value.trim()) setAddRegionError(''); }}
+                />
+                {addRegionError && <p className="mt-1 text-xs text-red-600">{addRegionError}</p>}
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setIsManageRegionsOpen(false)} className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs">Cancel</button>
+              <button onClick={handleAddRegion} className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded text-xs">Add Region</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isManageOrganizationsOpen && (
+        <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-md z-50 relative border border-gray-200">
+            <button onClick={() => setIsManageOrganizationsOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <h2 className="text-xl font-semibold mb-3 text-gray-900">Manage Organizations</h2>
+            <p className="text-xs text-gray-600 mb-3">Add or remove organizations and pick the active one.</p>
+            <div className="space-y-3">
+              <div className="max-h-40 overflow-auto border border-gray-200 rounded p-2">
+                {organizations.length === 0 ? (
+                  <div className="text-xs text-gray-500">No organizations</div>
+                ) : (
+                  organizations.map(o => (
+                    <div key={o.org_id} className="flex items-center justify-between text-xs py-1">
+                      <button className="text-left" onClick={() => changeOrganization(o.org_id)}>{o.name}</button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await deleteOrganization(o.org_id);
+                            const orgs = await listOrganizations();
+                            setOrganizations(orgs);
+                            const newSel = orgs.find(x => x.org_id === selectedOrg?.org_id) || orgs[0] || null;
+                            await changeOrganization(newSel?.org_id || "");
+                          } catch (e) {
+                            console.error('Failed to delete organization', e);
+                          }
+                        }}
+                        className="text-red-600 hover:text-red-800"
+                      >Delete</button>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div>
+                <label className="text-xs text-gray-600">New Organization Name</label>
+                <input
+                  className={`border ${addOrgError ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 focus:ring-teal-500'} p-2 rounded w-full text-xs`}
+                  placeholder="e.g., LGED"
+                  value={newOrgName}
+                  onChange={(e) => { setNewOrgName(e.target.value); if (addOrgError && e.target.value.trim()) setAddOrgError(''); }}
+                />
+                {addOrgError && <p className="mt-1 text-xs text-red-600">{addOrgError}</p>}
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setIsManageOrganizationsOpen(false)} className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs">Cancel</button>
+              <button onClick={handleAddOrganization} className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded text-xs">Add Organization</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isImportModalOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
           <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
@@ -980,7 +1346,7 @@ export default function Products() {
                     if (f) { setImportFile(f); setImportError(""); }
                     setIsImportDragging(false);
                   }}
-                  className={`border-2 rounded-lg p-5 text-center cursor-pointer transition shadow-sm ${isImportDragging ? 'border-indigo-400 bg-indigo-50' : 'border-dashed border-gray-300 bg-gray-50 hover:bg-gray-100'} ${importError ? 'border-red-400 bg-red-50' : ''}`}
+                  className={`border-2 rounded-lg p-5 text-center cursor-pointer transition shadow-sm ${isImportDragging ? 'border-teal-400 bg-teal-50' : 'border-dashed border-gray-300 bg-gray-50 hover:bg-gray-100'} ${importError ? 'border-red-400 bg-red-50' : ''}`}
                 >
                   <div className="flex flex-col items-center gap-2">
                     <FaUpload className="w-6 h-6 text-gray-600" />
@@ -999,7 +1365,7 @@ export default function Products() {
                     type="button"
                     onClick={() => fileInputRef.current && fileInputRef.current.click()}
                     disabled={isImporting}
-                    className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} inline-flex items-center gap-2 px-3 py-2 bg-gray-800 text-white rounded-md text-xs hover:bg-gray-900`}
+                    className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} inline-flex items-center gap-2 px-3 py-2 bg-teal-700 text-white rounded-md text-xs hover:bg-teal-900`}
                   >
                     <FaUpload className="w-3 h-3" />
                     <span>Browse files</span>
@@ -1015,7 +1381,7 @@ export default function Products() {
                     </button>
                   )}
                 </div>
-                <button type="button" onClick={downloadTemplateCSV} className="text-xs text-teal-700 hover:text-teal-900 underline">Download CSV template</button>
+                  <button type="button" onClick={downloadTemplateCSV} className="text-xs text-emerald-700 hover:text-emerald-900 underline">Download CSV template</button>
               </div>
               <div className="flex items-center gap-6">
                 <label className="flex items-center gap-2">
@@ -1040,14 +1406,14 @@ export default function Products() {
                   type="button"
                   onClick={() => setIsImportModalOpen(false)}
                   disabled={isImporting}
-                  className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-indigo-600 text-indigo-700 hover:bg-indigo-50 font-semibold text-sm py-1 px-4 rounded-md`}
+                  className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold text-sm py-1 px-4 rounded-md`}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleImportClick}
                   disabled={isImporting}
-                  className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 text-white font-semibold text-sm py-1 px-6 rounded-md`}
+                  className={`${isImporting ? 'opacity-70 cursor-not-allowed' : ''} bg-teal-700 hover:bg-teal-900 text-white font-semibold text-sm py-1 px-6 rounded-md`}
                 >
                   {isImporting ? 'Importing…' : 'Import'}
                 </button>
@@ -1065,63 +1431,102 @@ export default function Products() {
             </button>
             <h2 className="text-xl sm:text-2xl font-semibold mb-2 text-gray-900">Mass Delete Items</h2>
             <p className="text-sm text-gray-700 mb-3">Use the filter below to target items. This action cannot be undone.</p>
-            <div className="grid grid-cols-3 gap-2 mb-4 items-end">
-              <div>
-                <label className="text-xs text-gray-700">Column</label>
-                <select value={massFilterColumn} onChange={(e)=>{ setMassFilterColumn(e.target.value); setMassFilterOperator('equals'); setMassFilterValue(''); }} className="w-full border p-2 rounded text-xs">
-                  <option value="division">Division</option>
-                  <option value="code">Code</option>
-                  <option value="description">Description</option>
-                  <option value="unit">Unit</option>
-                  <option value="rate">Rate</option>
-                  <option value="region">Region</option>
-                </select>
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-3">
+                  <h3 className="text-sm font-semibold text-gray-900">Filters</h3>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-gray-600">Match</span>
+                    <select
+                      value={massFilterJoin}
+                      onChange={(e)=>setMassFilterJoin(e.target.value)}
+                      className="border p-1 rounded text-xs"
+                    >
+                      <option value="AND">All (AND)</option>
+                      <option value="OR">Any (OR)</option>
+                    </select>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMassFilters(prev => [...prev, { column: 'code', operator: 'equals', value: '' }])}
+                  className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-2 py-1 rounded"
+                >Add Filter</button>
               </div>
-              <div>
-                <label className="text-xs text-gray-700">Operator</label>
-                <select value={massFilterOperator} onChange={(e)=>setMassFilterOperator(e.target.value)} className="w-full border p-2 rounded text-xs">
-                  {isStringColumn(massFilterColumn) && (
-                    <>
-                      <option value="equals">Equals</option>
-                      <option value="not_equals">Not Equals</option>
-                      <option value="contains">Contains</option>
-                      <option value="starts_with">Starts With</option>
-                      <option value="ends_with">Ends With</option>
-                    </>
-                  )}
-                  {isNumberColumn(massFilterColumn) && (
-                    <>
-                      <option value="equals">Equals</option>
-                      <option value="not_equals">Not Equals</option>
-                      <option value="less_than">Less Than</option>
-                      <option value="less_or_equal">Less Than or Equal</option>
-                      <option value="greater_than">Greater Than</option>
-                      <option value="greater_or_equal">Greater Than or Equal</option>
-                    </>
-                  )}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-gray-700">Value</label>
-                <input type={isNumberColumn(massFilterColumn) ? 'number' : 'text'} value={massFilterValue} onChange={(e)=>setMassFilterValue(e.target.value)} className="w-full border p-2 rounded text-xs" placeholder={isNumberColumn(massFilterColumn) ? 'Enter number' : 'Enter text'} />
+              <div className="space-y-2">
+                {massFilters.map((f, idx) => (
+                  <div key={idx} className="grid grid-cols-3 gap-2 items-end">
+                    <div>
+                      <label className="text-xs text-gray-700">Column</label>
+                      <select
+                        value={f.column}
+                        onChange={(e)=>{
+                          const col = e.target.value;
+                          setMassFilters(prev => prev.map((pf,i)=> i===idx ? { ...pf, column: col, operator: 'equals', value: '' } : pf));
+                        }}
+                        className="w-full border p-2 rounded text-xs"
+                      >
+                        <option value="division">Division</option>
+                        <option value="code">Code</option>
+                        <option value="description">Description</option>
+                        <option value="unit">Unit</option>
+                        <option value="rate">Rate</option>
+                        <option value="region">Region</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-700">Operator</label>
+                      <select
+                        value={f.operator}
+                        onChange={(e)=>setMassFilters(prev => prev.map((pf,i)=> i===idx ? { ...pf, operator: e.target.value } : pf))}
+                        className="w-full border p-2 rounded text-xs"
+                      >
+                        {isStringColumn(f.column) && (
+                          <>
+                            <option value="equals">Equals</option>
+                            <option value="not_equals">Not Equals</option>
+                            <option value="contains">Contains</option>
+                            <option value="starts_with">Starts With</option>
+                            <option value="ends_with">Ends With</option>
+                          </>
+                        )}
+                        {isNumberColumn(f.column) && (
+                          <>
+                            <option value="equals">Equals</option>
+                            <option value="not_equals">Not Equals</option>
+                            <option value="less_than">Less Than</option>
+                            <option value="less_or_equal">Less Than or Equal</option>
+                            <option value="greater_than">Greater Than</option>
+                            <option value="greater_or_equal">Greater Than or Equal</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-700">Value</label>
+                      <input
+                        type={isNumberColumn(f.column) ? 'number' : 'text'}
+                        value={f.value}
+                        onChange={(e)=>setMassFilters(prev => prev.map((pf,i)=> i===idx ? { ...pf, value: e.target.value } : pf))}
+                        className="w-full border p-2 rounded text-xs"
+                        placeholder={isNumberColumn(f.column) ? 'Enter number' : 'Enter text'}
+                      />
+                    </div>
+                    <div className="col-span-3 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setMassFilters(prev => prev.filter((_, i) => i !== idx))}
+                        className="bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs px-2 py-1 rounded"
+                        disabled={massFilters.length === 1}
+                        title={massFilters.length === 1 ? 'At least one filter required' : 'Remove this filter'}
+                      >Remove</button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
             <p className="text-sm text-gray-700 mb-2">Matching items: <span className="font-medium">{isMassFilterActive ? massFilteredItems.length : filteredItems.length}</span></p>
-            {deleteCandidates.length > 0 && (
-              <div className="mb-4 border rounded-md bg-gray-50">
-                <div className="px-3 py-2 text-xs text-gray-600">Sample of items to be deleted:</div>
-                <ul className="max-h-36 overflow-auto text-xs text-gray-800">
-                  {deleteCandidates.slice(0, 10).map(it => (
-                    <li key={it.item_id} className="px-3 py-1 border-t border-gray-100">
-                      <span className="font-medium">{it.item_code}</span> — {it.item_description}
-                    </li>
-                  ))}
-                </ul>
-                {deleteCandidates.length > 10 && (
-                  <div className="px-3 py-2 text-[11px] text-gray-500">…and {deleteCandidates.length - 10} more</div>
-                )}
-              </div>
-            )}
+            {/* Removed sample list to simplify modal; users can refine filters instead */}
             {isMassDeleteConfirmOpen && (
               <div className="mb-4 border border-red-200 bg-red-50 rounded-md px-3 py-2">
                 <p className="text-xs text-red-700 mb-2">This will delete <span className="font-semibold">{deleteCandidates.length}</span> item(s) permanently. Continue?</p>
@@ -1130,7 +1535,7 @@ export default function Products() {
                     type="button"
                     onClick={() => setIsMassDeleteConfirmOpen(false)}
                     disabled={isMassDeleting}
-                    className={`${isMassDeleting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-blue-600 text-blue-700 hover:bg-blue-50 font-semibold text-xs py-1 px-3 rounded-md`}
+                    className={`${isMassDeleting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold text-xs py-1 px-3 rounded-md`}
                   >
                     Cancel
                   </button>
@@ -1157,7 +1562,7 @@ export default function Products() {
                 type="button"
                 onClick={() => setIsMassDeleteModalOpen(false)}
                 disabled={isMassDeleting}
-                className={`${isMassDeleting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-blue-600 text-blue-700 hover:bg-blue-50 font-semibold text-sm py-1 px-4 rounded-md`}
+                className={`${isMassDeleting ? 'opacity-70 cursor-not-allowed' : ''} bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold text-sm py-1 px-4 rounded-md`}
               >
                 Cancel
               </button>
@@ -1184,15 +1589,15 @@ export default function Products() {
             <table className="min-w-full border-collapse table-fixed">
               <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
                 <tr>
-                  <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[40px] text-gray-800 border-gray-200">
-                    <input type="checkbox" onChange={toggleSelectAllCurrent} checked={currentPageItemIds().length > 0 && currentPageItemIds().every(id => selectedItemIds.includes(id))} />
-                  </th>
+                  <th className="px-2 py-1 text-center text-xs font-bold border-r min-w-[40px] text-gray-800 border-gray-200">Sel</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Division</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Code</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r w-[30%] text-gray-800 border-gray-200">Description</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Unit</th>
-                  <th className="px-2 py-1 text-right text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Rate</th>
-                  <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Region</th>
+                  <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[140px] text-gray-800 border-gray-200">Organization</th>
+  {orgRegions.map((r) => (
+                    <th key={r} className="px-2 py-1 text-right text-xs font-bold border-r min-w-[140px] text-gray-800 border-gray-200">{r}</th>
+                  ))}
                 </tr>
                 <tr>
                   <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>
@@ -1211,29 +1616,18 @@ export default function Products() {
                       {uniqueUnits.map(unit => <option key={unit} value={unit}>{unit}</option>)}
                     </select>
                   </th>
-                  <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
-                    <div className="flex items-center">
-                      <select value={search.rateOperator} onChange={(e) => setSearch({ ...search, rateOperator: e.target.value })} className="mr-1 w-auto text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200">
-                        <option value="==">==</option>
-                        <option value="!=">!=</option>
-                        <option value=">"> &gt;</option>
-                        <option value="<">&lt;</option>
-                      </select>
-                      <input type="text" placeholder="Search..." value={search.rate} onChange={(e) => setSearch({ ...search, rate: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
-                    </div>
+                  <th className="px-2 py-1 border-r min-w-[140px] border-gray-200">
+                    <input type="text" placeholder="Search..." value={search.organization} onChange={(e) => setSearch({ ...search, organization: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
                   </th>
-                  <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
-                    <select value={search.region} onChange={(e) => setSearch({ ...search, region: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200">
-                      <option value="">All Regions</option>
-                      {uniqueRegions.map(region => <option key={region} value={region}>{region}</option>)}
-                    </select>
-                  </th>
+  {orgRegions.map((r) => (
+                    <th key={r} className="px-2 py-1 border-r min-w-[140px] border-gray-200"></th>
+                  ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200 bg-white">
-                {items.length === 0 ? (
+                {groupedRows.length === 0 ? (
                   <tr>
-                    <td colSpan="7" className="p-4 sm:p-8 text-center text-gray-600">
+  <td colSpan={5 + orgRegions.length} className="p-4 sm:p-8 text-center text-gray-600">
                       <div className="flex flex-col items-center">
                         <div className="text-lg mb-2">📭</div>
                         <div className="text-sm font-medium">No data found</div>
@@ -1242,52 +1636,39 @@ export default function Products() {
                   </tr>
                 ) : (
                   currentItems
-                    .map((it, i) => (
-                      <tr key={it.item_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors ${selectedItemIds.includes(it.item_id) ? 'bg-indigo-100' : ''}`}>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">
-                          <input type="checkbox" checked={selectedItemIds.includes(it.item_id)} onChange={() => toggleSelectItem(it.item_id)} />
+                    .map((row, i) => (
+                      <tr key={`${row.item_code}|${row.division_id ?? row.division?.name ?? i}`} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
+                        <td className="px-2 py-1 text-center border-r border-gray-200">
+                          <input
+                            type="checkbox"
+                            checked={selectedGroupKey === `${row.division_id}|${row.item_code}`}
+                            onChange={() => setSelectedGroupKey(prev => prev === `${row.division_id}|${row.item_code}` ? null : `${row.division_id}|${row.item_code}`)}
+                          />
                         </td>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{it.division?.name ?? "—"}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{it.item_code}</td>
-                        <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200 max-w-[28rem]" title={it.item_description}>{it.item_description}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{it.unit}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200 text-right">{formatRate(it.rate)}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{it.region}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.division?.name ?? "—"}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.item_code}</td>
+                        <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200 max-w-[28rem]" title={row.item_description}>{row.item_description}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.unit}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.organization || 'RHD'}</td>
+  {orgRegions.map((r) => (
+                          <td key={r} className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200 text-right">{row.rates[r] != null && row.rates[r] !== '' ? formatRate(row.rates[r]) : ''}</td>
+                        ))}
                       </tr>
                     ))
                 )}
               </tbody>
             </table>
-            {selectedItemIds.length > 0 && (
+            {selectedGroupKey && (
               <div className="sticky bottom-0 z-20 bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between">
-                <div className="text-xs">{selectedItemIds.length} selected item(s)</div>
-                {selectedItemIds.length === 1 ? (
-                  <div className="flex items-center gap-2">
-                    <button className="bg-gray-200 text-gray-900 text-xs px-3 py-1 rounded" onClick={() => openItemDetail(selectedItemIds[0])}>Item Detail</button>
-                    <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={() => {
-                      const it = items.find(x => x.item_id === selectedItemIds[0]);
-                      if (it) handleEdit(it);
-                    }}>Edit</button>
-                    <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={() => requestDeleteItem(selectedItemIds[0])}>Delete</button>
-                    <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={clearSelection}>Clear selection</button>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    {isDeleteSelectedConfirmOpen ? (
-                      <>
-                        <span className="text-xs">Delete {selectedItemIds.length} selected item(s)?</span>
-                        <button className="bg-white text-red-700 border border-red-600 hover:bg-red-50 text-xs px-3 py-1 rounded" onClick={() => setIsDeleteSelectedConfirmOpen(false)}>Cancel</button>
-                        <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={deleteSelectedItems}>Confirm</button>
-                      </>
-                    ) : (
-                      <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={() => setIsDeleteSelectedConfirmOpen(true)}>Delete</button>
-                    )}
-                    <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={clearSelection}>Clear selection</button>
-                  </div>
-                )}
+                <div className="text-xs">1 grouped item selected</div>
+                <div className="flex items-center gap-2">
+                  <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={() => beginEditSelectedGroup()}>Edit</button>
+                  <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={() => requestDeleteSelectedGroup()}>Delete</button>
+                  <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={clearSelection}>Clear selection</button>
+                </div>
               </div>
             )}
-            {selectedItemIds.length === 0 && isSearchActive() && (
+            {!selectedGroupKey && isSearchActive() && (
               <div className="sticky bottom-0 z-20 bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between">
                 <div className="text-xs">Filters applied</div>
                 <div className="flex items-center gap-2">
@@ -1302,7 +1683,7 @@ export default function Products() {
       </div>
       <div ref={bottomPaginationRef} className="flex flex-wrap justify-between items-center p-4 gap-3">
         <div className="text-xs text-gray-600">
-          {new Intl.NumberFormat('en-US').format(filteredItems.length)} rows
+          {new Intl.NumberFormat('en-US').format(groupedFilteredRows.length)} rows
         </div>
         <div className="flex items-center gap-2 text-gray-600">
           <select
@@ -1338,15 +1719,15 @@ export default function Products() {
               }
               return (
                 <>
-                  {pages.map(p => (
-                    <button
-                      key={p}
-                      onClick={() => setCurrentPage(p)}
-                      className={`px-2 py-1 border rounded text-xs ${p === currentPage ? 'bg-indigo-600 text-white border-indigo-600' : 'hover:bg-gray-100 text-gray-600'}`}
-                    >
-                      {p}
-                    </button>
-                  ))}
+              {pages.map(p => (
+                <button
+                  key={p}
+                  onClick={() => setCurrentPage(p)}
+                  className={`px-2 py-1 border rounded text-xs ${p === currentPage ? 'bg-teal-600 text-white border-teal-600' : 'hover:bg-gray-100 text-gray-600'}`}
+                >
+                  {p}
+                </button>
+              ))}
                   {totalPages > pages[pages.length-1] && (
                     <>
                       <span className="px-2 py-1 text-gray-400 text-xs">…</span>
@@ -1411,7 +1792,7 @@ export default function Products() {
             <button onClick={() => setIsEditModalOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
-            <h2 className="text-xl sm:text-2xl font-semibold mb-2 text-gray-900">Edit Item</h2>
+            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Edit Item</h2>
             <div className="grid grid-cols-2 gap-4 mt-2">
               <select name="division_id" value={editItem.division_id} onChange={(e) => setEditItem({ ...editItem, division_id: e.target.value })} className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500">
                 <option value="">Division</option>
@@ -1459,8 +1840,64 @@ export default function Products() {
               <input name="rate" value={editItem.rate} onChange={(e) => setEditItem({ ...editItem, rate: e.target.value })} placeholder="Rate" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
               <input name="region" value={editItem.region} onChange={(e) => setEditItem({ ...editItem, region: e.target.value })} placeholder="Region" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
             </div>
-            <div className="flex justify-end mt-6">
-              <button onClick={updateItem} className="bg-teal-600 hover:bg-teal-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors">Save</button>
+            <div className="flex justify-end mt-6 gap-3">
+              <button
+                type="button"
+                onClick={() => setIsEditModalOpen(false)}
+                className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={updateItem}
+                className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isEditGroupModalOpen && editGroupForm && (
+        <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-3xl z-50 relative border border-gray-200">
+            <button onClick={() => setIsEditGroupModalOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">✕</button>
+            <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-gray-900">Edit Grouped Item Rates</h2>
+            <div className="grid grid-cols-2 gap-4 mt-2">
+              <select name="division_id" value={editGroupForm.division_id} onChange={(e) => setEditGroupForm({ ...editGroupForm, division_id: e.target.value })} className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                <option value="">Division</option>
+                {divisions.map(d => <option key={d.division_id} value={d.division_id}>{d.name}</option>)}
+              </select>
+              <input name="item_code" value={editGroupForm.item_code} onChange={(e) => setEditGroupForm({ ...editGroupForm, item_code: e.target.value })} placeholder="Code" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <input name="item_description" value={editGroupForm.item_description} onChange={(e) => setEditGroupForm({ ...editGroupForm, item_description: e.target.value })} placeholder="Description" className="border border-gray-300 p-3 rounded-lg col-span-2 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <select name="unit" value={editGroupForm.unit} onChange={(e) => setEditGroupForm({ ...editGroupForm, unit: e.target.value })} className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                <option value="">Select Unit</option>
+                {uniqueUnits.map(unit => <option key={unit} value={unit}>{unit}</option>)}
+              </select>
+              <input name="organization" value={editGroupForm.organization} onChange={(e) => setEditGroupForm({ ...editGroupForm, organization: e.target.value })} placeholder="Organization" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            </div>
+            <div className="mt-4">
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">Region Rates</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+  {orgRegions.map((r) => (
+                  <div key={r} className="flex items-center gap-2">
+                    <label className="w-40 text-xs text-gray-700">{r}</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editGroupForm.regionRates[r] ?? ''}
+                      onChange={(e) => setEditGroupForm(prev => ({ ...prev, regionRates: { ...prev.regionRates, [r]: e.target.value } }))}
+                      className="border border-gray-300 p-2 rounded-lg text-xs flex-1 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      placeholder="Rate"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end mt-6 gap-2">
+              <button onClick={() => setIsEditGroupModalOpen(false)} className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs">Cancel</button>
+              <button onClick={saveEditGroup} className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs">Save</button>
             </div>
           </div>
         </div>
@@ -1485,6 +1922,29 @@ export default function Products() {
                 className={`bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-3 rounded text-xs ${isDeletingItem ? 'opacity-60 cursor-not-allowed' : ''}`}
               >
                 {isDeletingItem ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isConfirmDeleteGroupOpen && (
+        <div className="fixed inset-0 bg-black/20 flex justify-center items-center z-[60]">
+          <div className="bg-white rounded-xl shadow-xl border border-gray-200 w/full max-w-sm p-4">
+            <h3 className="text-sm font-semibold text-gray-900 mb-2">Delete Grouped Rates</h3>
+            <p className="text-xs text-gray-600 mb-4">Delete all region rates for this item code in the selected division? This may remove multiple rows and cannot be undone.</p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setIsConfirmDeleteGroupOpen(false)}
+                className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteSelectedGroup}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-3 rounded text-xs"
+              >
+                Delete
               </button>
             </div>
           </div>

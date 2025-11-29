@@ -4,7 +4,6 @@ import Products from "./pages/Products";
 import Projects from "./pages/Projects";
 import ProjectEstimations from "./pages/ProjectEstimations";
 import EstimationDetail from "./pages/EstimationDetail";
-import Sidebar from "./components/Sidebar";
 
 export default function App() {
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
@@ -100,6 +99,7 @@ export default function App() {
           >
             Projects
           </Link>
+          
         </nav>
       </header>
       <div className="p-6">
@@ -112,6 +112,7 @@ export default function App() {
           <Route path="/projects" element={<Projects />} />
           <Route path="/projects/:projectId/estimations" element={<ProjectEstimations />} />
           <Route path="/estimations/:estimationId" element={<EstimationDetail />} />
+          
         </Routes>
       </div>
 
@@ -140,6 +141,7 @@ export default function App() {
             <nav className="flex flex-col gap-2">
               <Link to="/products" className="px-3 py-2 rounded hover:bg-teal-800" onClick={() => setIsLauncherOpen(false)}>Items</Link>
               <Link to="/projects" className="px-3 py-2 rounded hover:bg-teal-800" onClick={() => setIsLauncherOpen(false)}>Projects</Link>
+              
             </nav>
           </aside>
         </div>

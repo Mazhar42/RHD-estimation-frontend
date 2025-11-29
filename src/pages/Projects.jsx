@@ -1,17 +1,23 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { Link } from "react-router-dom";
-import { FaTrashAlt, FaPlus } from "react-icons/fa";
+import { Link, useNavigate } from "react-router-dom";
+import { FaTrashAlt, FaPlus, FaEdit } from "react-icons/fa";
 
 const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
 
 export default function Projects() {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState([]);
   const [form, setForm] = useState({ project_name: "", client_name: "" });
   const [isAddProjectModalOpen, setIsAddProjectModalOpen] = useState(false);
   const [addProjectError, setAddProjectError] = useState("");
   const [isConfirmDeleteProjectOpen, setIsConfirmDeleteProjectOpen] = useState(false);
   const [projectPendingDelete, setProjectPendingDelete] = useState(null);
+  // Selection for possible single-row actions (no mass delete requested)
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [isEditProjectModalOpen, setIsEditProjectModalOpen] = useState(false);
+  const [editProjectForm, setEditProjectForm] = useState({ project_name: "", client_name: "" });
+  const [editProjectError, setEditProjectError] = useState("");
 
   useEffect(() => { fetchProjects(); }, []);
 
@@ -88,6 +94,33 @@ export default function Projects() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isConfirmDeleteProjectOpen]);
 
+  // ... (inside the component)
+
+  const openEditProject = (project) => {
+    setSelectedProjectId(project.project_id);
+    setEditProjectForm({ project_name: project.project_name || "", client_name: project.client_name || "" });
+    setEditProjectError("");
+    setIsEditProjectModalOpen(true);
+  };
+
+  const submitEditProject = async (e) => {
+    e.preventDefault();
+    if (!editProjectForm.project_name.trim()) {
+      setEditProjectError("Project name is required");
+      return;
+    }
+    try {
+      await axios.patch(`${API}/projects/${selectedProjectId}`, editProjectForm);
+      setIsEditProjectModalOpen(false);
+      setSelectedProjectId(null);
+      setEditProjectForm({ project_name: "", client_name: "" });
+      fetchProjects();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || "Failed to update project";
+      setEditProjectError(msg);
+    }
+  };
+
   return (
     <div className="relative bg-white p-4 sm:p-6 -mx-6 -mb-6 w-[calc(100%+3rem)]">
       <div className="flex justify-between items-center mb-4">
@@ -148,6 +181,52 @@ export default function Projects() {
         </div>
       )}
 
+      {isEditProjectModalOpen && (
+        <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
+            <button onClick={() => setIsEditProjectModalOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Edit Project</h2>
+            <p className="text-xs text-gray-600 mb-3">Update the project name and client.</p>
+            {editProjectError && (
+              <p className="mb-3 text-sm text-red-600">{editProjectError}</p>
+            )}
+            <form onSubmit={submitEditProject} className="grid grid-cols-1 gap-3 mt-2">
+              <input
+                name="project_name"
+                value={editProjectForm.project_name}
+                onChange={(e) => { setEditProjectForm({ ...editProjectForm, project_name: e.target.value }); if (editProjectError && e.target.value.trim()) setEditProjectError(""); }}
+                placeholder="Project name"
+                className={`border ${editProjectError ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 focus:ring-teal-500'} p-3 rounded-lg w-full focus:outline-none focus:ring-2 text-sm`}
+              />
+              <input
+                name="client_name"
+                value={editProjectForm.client_name}
+                onChange={(e) => setEditProjectForm({ ...editProjectForm, client_name: e.target.value })}
+                placeholder="Client name"
+                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-sm"
+              />
+              <div className="mt-2 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsEditProjectModalOpen(false)}
+                  className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs"
+                >
+                  Save
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {isConfirmDeleteProjectOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
           <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-md z-50 relative border border-gray-200">
@@ -178,34 +257,65 @@ export default function Projects() {
         </div>
       )}
 
-      <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3">
-        {projects.map(p => (
-          <Link
-            key={p.project_id}
-            to={`/projects/${p.project_id}/estimations`}
-            className="group relative block rounded-lg border border-gray-200 bg-white hover:shadow-md transition aspect-square"
-          >
-            <div className="absolute top-2 right-2 z-10">
-              <button
-                type="button"
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); requestDeleteProject(p); }}
-                className="p-1.5 rounded-full bg-white/80 shadow-sm ring-1 ring-red-200 text-red-500 hover:text-red-700 hover:bg-red-50 hover:ring-red-300 transition"
-                title="Delete Project"
-              >
-                <FaTrashAlt size={16} />
-              </button>
-            </div>
-            <div className="h-full w-full p-3 flex flex-col items-start justify-center">
-              <div className="text-sm sm:text-base font-semibold text-gray-900 truncate group-hover:text-teal-700">
-                {p.project_name}
-              </div>
-              <div className="mt-1 text-[11px] sm:text-xs text-gray-600 truncate">
-                {p.client_name || ""}
-              </div>
-              <div className="mt-auto text-[11px] text-gray-400">Click to open</div>
-            </div>
-          </Link>
-        ))}
+      {/* Table replacing card layout, similar style to Item list */}
+      <div className="border rounded-md overflow-hidden">
+        <div className="overflow-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-100">
+              <tr>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Project Name</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Client Name</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Project Created By</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Created At</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated By</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated At</th>
+                <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 whitespace-nowrap">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {projects.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-600">No projects found</td>
+                </tr>
+              ) : (
+                projects.map((p, i) => (
+                  <tr key={p.project_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
+                    <td className="px-3 py-2 text-xs text-teal-700 font-medium whitespace-nowrap">
+                      <Link to={`/projects/${p.project_id}/estimations`} className="hover:underline">
+                        {p.project_name}
+                      </Link>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{p.client_name || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap text-right">
+                      <div className="inline-flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
+                          onClick={() => openEditProject(p)}
+                          title="Edit Project"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
+                          onClick={() => requestDeleteProject(p)}
+                          title="Delete Project"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

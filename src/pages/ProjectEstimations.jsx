@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { useParams, Link } from "react-router-dom";
-import { FaTrash, FaPlus } from "react-icons/fa";
+import { useParams, Link, useNavigate } from "react-router-dom";
+import { FaTrash, FaPlus, FaEdit } from "react-icons/fa";
 
 const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
 
 export default function ProjectEstimations() {
+  const navigate = useNavigate();
   const { projectId } = useParams();
   const [estimations, setEstimations] = useState([]);
   const [name, setName] = useState("");
@@ -16,6 +17,11 @@ export default function ProjectEstimations() {
   const [createError, setCreateError] = useState("");
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [estimationToDelete, setEstimationToDelete] = useState(null);
+  const [isEditEstimationModalOpen, setIsEditEstimationModalOpen] = useState(false);
+  const [editEstimationId, setEditEstimationId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editRegion, setEditRegion] = useState("");
+  const [editError, setEditError] = useState("");
 
   useEffect(() => {
     fetchEstimations();
@@ -151,6 +157,39 @@ export default function ProjectEstimations() {
     setEstimationToDelete(null);
   };
 
+  const openEditEstimation = (es) => {
+    setEditEstimationId(es.estimation_id);
+    const currentRegion = localStorage.getItem(`estimationRegion:${es.estimation_id}`) || "";
+    setEditRegion(currentRegion);
+    setEditName(es.estimation_name || "");
+    setEditError("");
+    setIsEditEstimationModalOpen(true);
+  };
+
+  const submitEditEstimation = async (e) => {
+    e.preventDefault();
+    if (!editRegion) {
+      setEditError("Region should not be empty");
+      return;
+    }
+    try {
+      await axios.patch(`${API}/estimations/${editEstimationId}`, { estimation_name: editName || `Estimation #${editEstimationId}` });
+      try {
+        localStorage.setItem(`estimationRegion:${editEstimationId}`, editRegion);
+        if (editName) localStorage.setItem(`estimationName:${editEstimationId}`, editName);
+      } catch {}
+      setIsEditEstimationModalOpen(false);
+      setEditEstimationId(null);
+      setEditName("");
+      setEditRegion("");
+      setEditError("");
+      fetchEstimations();
+    } catch (err) {
+      const msg = err?.response?.data?.detail || "Failed to update estimation";
+      setEditError(msg);
+    }
+  };
+
   return (
     <div className="relative bg-white p-4 sm:p-6 -mx-6 -mb-6 w-[calc(100%+3rem)]">
       <div className="flex justify-between items-center mb-4">
@@ -246,34 +285,119 @@ export default function ProjectEstimations() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-        {estimations.map(es => (
-          <Link
-            key={es.estimation_id}
-            to={`/estimations/${es.estimation_id}?region=${encodeURIComponent(localStorage.getItem(`estimationRegion:${es.estimation_id}`) || '')}`}
-            className="group relative block rounded-lg border border-gray-200 bg-white hover:shadow-md transition aspect-square"
-          >
-            <div className="absolute top-2 right-2 z-10">
-              <button
-                type="button"
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); openDeleteConfirm(es.estimation_id, es.estimation_name); }}
-                className="text-red-500 hover:text-red-700 p-2 rounded-full hover:bg-red-50"
-                title="Delete Estimation"
+      {isEditEstimationModalOpen && (
+        <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
+            <button onClick={() => setIsEditEstimationModalOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Edit Estimation</h2>
+            <p className="text-xs text-gray-600 mb-3">Update estimation name (optional) and Region (mandatory).</p>
+            {editError && (
+              <p className="mb-3 text-sm text-red-600">{editError}</p>
+            )}
+            <form onSubmit={submitEditEstimation} className="grid grid-cols-1 gap-3 mt-2">
+              <input
+                value={editName}
+                onChange={(e) => { setEditName(e.target.value); if (editError && e.target.value.trim()) setEditError(""); }}
+                placeholder="Estimation name"
+                className="border border-gray-300 focus:ring-teal-500 p-3 rounded-lg w-full focus:outline-none focus:ring-2 text-sm"
+              />
+              <select
+                value={editRegion}
+                onChange={(e) => { setEditRegion(e.target.value); if (editError && e.target.value) setEditError(""); }}
+                className={`border ${editError && !editRegion ? 'border-red-500 focus:ring-red-500' : 'border-gray-300 focus:ring-teal-500'} p-3 rounded-lg w-full focus:outline-none focus:ring-2 text-sm`}
               >
-                <FaTrash />
-              </button>
-            </div>
-            <div className="h-full w-full p-4 flex flex-col items-start justify-center">
-              <div className="text-base sm:text-lg font-semibold text-gray-900 truncate group-hover:text-teal-700">
-                {es.estimation_name || `Estimation #${es.estimation_id}`}
+                {regions.length === 0 ? <option value="">Loading regions…</option> : (
+                  <>
+                    <option value="">Select Region</option>
+                    {regions.map(r => <option key={r} value={r}>{r}</option>)}
+                  </>
+                )}
+              </select>
+              <div className="mt-2 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsEditEstimationModalOpen(false)}
+                  className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs"
+                  disabled={!editRegion}
+                >
+                  Save
+                </button>
               </div>
-              <div className="mt-1 text-xs sm:text-sm text-gray-600 truncate">
-                Region: {localStorage.getItem(`estimationRegion:${es.estimation_id}`) || '—'}
-              </div>
-              <div className="mt-auto text-[11px] text-gray-400">Click to open</div>
-            </div>
-          </Link>
-        ))}
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Table replacing card layout, mirroring the Projects table style */}
+      <div className="border rounded-md overflow-hidden">
+        <div className="overflow-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-100">
+              <tr>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Estimation Name</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Region</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Created By</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Created At</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated By</th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated At</th>
+                <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 whitespace-nowrap">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {estimations.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-600">No estimations found</td>
+                </tr>
+              ) : (
+                estimations.map((es, i) => (
+                  <tr key={es.estimation_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
+                    <td className="px-3 py-2 text-xs text-teal-700 font-medium whitespace-nowrap">
+                      <Link
+                        to={`/estimations/${es.estimation_id}?region=${encodeURIComponent(localStorage.getItem(`estimationRegion:${es.estimation_id}`) || '')}`}
+                        className="hover:underline"
+                      >
+                        {es.estimation_name || `Estimation #${es.estimation_id}`}
+                      </Link>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{localStorage.getItem(`estimationRegion:${es.estimation_id}`) || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap text-right">
+                      <div className="inline-flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
+                          onClick={() => openEditEstimation(es)}
+                          title="Edit Estimation"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
+                          onClick={() => openDeleteConfirm(es.estimation_id, es.estimation_name)}
+                          title="Delete Estimation"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
