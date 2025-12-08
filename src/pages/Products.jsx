@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import { listOrganizations, listRegions, createRegion, deleteRegion, createOrganization, deleteOrganization, updateOrganization, updateRegion } from "../api/orgs";
+import { API_BASE as API } from "../api/base";
 import { FaEdit, FaTrash, FaPlus, FaUpload } from "react-icons/fa";
 
-const API = import.meta.env.VITE_API_BASE;
+// Use robust API base to avoid '/undefined' in production
 
 export default function Products() {
   const [isAddDivisionModalOpen, setIsAddDivisionModalOpen] = useState(false);

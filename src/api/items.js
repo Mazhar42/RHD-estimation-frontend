@@ -1,6 +1,5 @@
 import axios from "axios";
-
-const API_BASE = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
+import { API_BASE } from "./base";
 
 export const listDivisions = async () => {
   const res = await axios.get(`${API_BASE}/items/divisions`);

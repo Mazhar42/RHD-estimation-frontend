@@ -1,6 +1,5 @@
 import axios from "axios";
-
-const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
+import { API_BASE as API } from "./base";
 
 export async function listOrganizations() {
   const res = await axios.get(`${API}/orgs`);

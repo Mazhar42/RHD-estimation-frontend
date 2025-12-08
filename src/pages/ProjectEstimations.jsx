@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
+import { API_BASE as API } from "../api/base";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { FaTrash, FaPlus, FaEdit } from "react-icons/fa";
 
-const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
+// Use centralized API base resolver
 
 export default function ProjectEstimations() {
   const navigate = useNavigate();

@@ -2,13 +2,14 @@ import React, { useEffect, useState, useRef } from "react";
 import { FaPlus, FaTrash, FaEdit, FaFileExcel, FaFileCsv, FaUpload, FaFilePdf } from "react-icons/fa";
 import axios from "axios";
 import { listDivisions, listItems } from "../api/items";
+import { API_BASE as API } from "../api/base";
 import { listOrganizations, listRegions } from "../api/orgs";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
-const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
+// API base is now provided by centralized resolver
 
 export default function EstimationDetail() {
   const { estimationId } = useParams();
