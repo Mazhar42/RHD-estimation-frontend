@@ -31,3 +31,13 @@ export async function deleteOrganization(orgId) {
   const res = await axios.delete(`${API}/orgs/${orgId}`);
   return res.data; // deleted org
 }
+
+export async function updateOrganization(orgId, name) {
+  const res = await axios.patch(`${API}/orgs/${orgId}`, { name });
+  return res.data; // updated org
+}
+
+export async function updateRegion(regionId, name) {
+  const res = await axios.patch(`${API}/orgs/regions/${regionId}`, { name });
+  return res.data; // updated region
+}

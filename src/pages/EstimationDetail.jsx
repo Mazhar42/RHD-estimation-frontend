@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useRef } from "react";
 import { FaPlus, FaTrash, FaEdit, FaFileExcel, FaFileCsv, FaUpload, FaFilePdf } from "react-icons/fa";
 import axios from "axios";
-import { listDivisions } from "../api/items";
+import { listDivisions, listItems } from "../api/items";
+import { listOrganizations, listRegions } from "../api/orgs";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -239,12 +240,17 @@ export default function EstimationDetail() {
       if (fileInputRef.current) fileInputRef.current.click();
       return;
     }
+    // Close modal and show progress banner; continue import in background
+    setIsImportModalOpen(false);
+    setImportBanner({ type: 'info', message: 'Importing estimation lines… This may take a while.' });
     await submitImportLines();
   };
 
   // Auto-hide banner after a while
   useEffect(() => {
     if (!importBanner) return;
+    // Do not auto-hide info banners; hide success/warning after delay
+    if (importBanner.type === 'info' || importBanner.type === 'error') return;
     const t = setTimeout(() => setImportBanner(null), 8000);
     return () => clearTimeout(t);
   }, [importBanner]);
@@ -259,19 +265,61 @@ export default function EstimationDetail() {
       // normalize URL to include region
       if (!urlRegion) setSearchParams({ region: resolved });
     }
-    // Fetch items initially to populate available regions and items list
-    fetchItems(resolved);
+    // Fetch all items initially to populate available regions and items list
+    fetchItems();
     fetchLines();
   }, [estimationId]);
 
   const fetchItems = async (regionFilter) => {
     try {
-      const params = { limit: 10000 };
+      // If no regionFilter is provided, fetch ALL items irrespective of current estimation region.
+      const fetchAll = typeof regionFilter === 'undefined';
+      if (fetchAll) {
+        const res = await axios.get(`${API}/items`, { params: { limit: 10000 } });
+        const all = res.data || [];
+        const seen = new Set();
+        const dedup = all.filter((it) => {
+          const key = it.item_id ?? `${it.item_code}:${it.region}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        setItems(dedup);
+        const uniqueRegs = Array.from(new Set(dedup.map((it) => it.region))).filter(Boolean).sort();
+        setAvailableRegions(uniqueRegs);
+        return;
+      }
+
       const reg = regionFilter ?? region;
-      if (reg) params.region = reg;
-      const res = await axios.get(`${API}/items`, { params });
-      setItems(res.data);
-      const uniqueRegs = Array.from(new Set(res.data.map(it => it.region))).filter(Boolean).sort();
+      // Handle common spelling variants for the same zone
+      const aliasRegions = (r) => {
+        const v = (r || '').trim();
+        if (!v) return [null];
+        if (v === 'Comilla Zone') return ['Comilla Zone', 'Cumilla Zone'];
+        if (v === 'Cumilla Zone') return ['Cumilla Zone', 'Comilla Zone'];
+        return [v];
+      };
+
+      const regionsToFetch = aliasRegions(reg);
+
+      let all = [];
+      for (const r of regionsToFetch) {
+        const params = { limit: 10000 };
+        if (r) params.region = r;
+        const res = await axios.get(`${API}/items`, { params });
+        all = all.concat(res.data || []);
+      }
+
+      // Deduplicate items by item_id if present, otherwise by (item_code, region)
+      const seen = new Set();
+      const dedup = all.filter((it) => {
+        const key = it.item_id ?? `${it.item_code}:${it.region}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      setItems(dedup);
+      const uniqueRegs = Array.from(new Set(dedup.map((it) => it.region))).filter(Boolean).sort();
       setAvailableRegions(uniqueRegs);
     } catch (e) {
       console.error('Failed to fetch items', e);
@@ -600,10 +648,12 @@ export default function EstimationDetail() {
 
   const groupedLines = lines.reduce((acc, line) => {
     const divisionName = line.item?.division?.name || 'Uncategorized';
-    if (!acc[divisionName]) {
-      acc[divisionName] = [];
+    const orgName = (line.item?.organization || 'RHD');
+    const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+    if (!acc[label]) {
+      acc[label] = [];
     }
-    acc[divisionName].push(line);
+    acc[label].push(line);
     return acc;
   }, {});
 
@@ -1013,6 +1063,66 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
+  // Organization selection state
+  const [organizations, setOrganizations] = useState([]);
+  const [selectedOrganizationName, setSelectedOrganizationName] = useState("RHD");
+  const normalizeOrg = (s) => (s || 'RHD').trim().toUpperCase();
+  // Region selection (locked to passed-in region for RHD, selectable for other orgs)
+  const [selectedRegion, setSelectedRegion] = useState(region || "");
+  const [orgRegions, setOrgRegions] = useState([]);
+  const canonRegion = (s) => {
+    const x = String(s || '').toLowerCase();
+    // unify common spellings and spacing around punctuation
+    let y = x.replace(/\s+/g, ' ').trim();
+    y = y.replace(/\s*:\s*/g, ':'); // normalize colon spacing ("Zone-B :" -> "Zone-B:")
+    // normalize synonyms
+    y = y.replace(/cumilla/g, 'comilla');
+    y = y.replace(/chittagong/g, 'chattogram');
+    return y;
+  };
+  useEffect(() => {
+    const orgIsRHD = normalizeOrg(selectedOrganizationName) === 'RHD';
+    if (orgIsRHD) {
+      setSelectedRegion(region || "");
+    } else {
+      // When org changes away from RHD, default to first region from orgRegions
+      if (!selectedRegion || !orgRegions.includes(selectedRegion)) {
+        setSelectedRegion(orgRegions[0] || "");
+      }
+    }
+  }, [selectedOrganizationName, region, orgRegions]);
+  useEffect(() => {
+    const fetchOrgs = async () => {
+      try {
+        const res = await listOrganizations();
+        setOrganizations(res || []);
+        // Default to RHD if available
+        const rhd = (res || []).find(o => (o.name || '').toUpperCase() === 'RHD');
+        if (rhd) setSelectedOrganizationName(rhd.name);
+      } catch (e) {
+        console.error('Failed to fetch organizations', e);
+      }
+    };
+    fetchOrgs();
+  }, []);
+
+  // Load regions for the selected organization
+  useEffect(() => {
+    const loadRegions = async () => {
+      try {
+        const org = (organizations || []).find(o => normalizeOrg(o.name) === normalizeOrg(selectedOrganizationName));
+        if (!org) { setOrgRegions([]); return; }
+        const regs = await listRegions(org.org_id);
+        const names = (regs || []).map(r => r.name).filter(Boolean).sort();
+        setOrgRegions(names);
+      } catch (e) {
+        console.error('Failed to fetch regions for organization', e);
+        setOrgRegions([]);
+      }
+    };
+    loadRegions();
+  }, [organizations, selectedOrganizationName]);
+
   // Division-first selection state: fetch all divisions from backend so "Special Item" is visible
   const [divisions, setDivisions] = useState([]);
   useEffect(() => {
@@ -1032,6 +1142,9 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
   // Unit and unit-based input rules
   const [selectedUnit, setSelectedUnit] = useState("");
   const [unitMode, setUnitMode] = useState("default"); // 'default' | 'quantity' for units that support both
+  // Items available for current selection in this modal
+  const [modalItems, setModalItems] = useState([]);
+  const [itemsLoading, setItemsLoading] = useState(false);
   // Special Item attachment state
   const [attachmentName, setAttachmentName] = useState("");
   const [attachmentBase64, setAttachmentBase64] = useState("");
@@ -1140,6 +1253,46 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
     setSelectedUnit("");
   }, [selectedDivisionId]);
 
+  // Keep items in the modal synced with current Organization/Region/Division selection
+  useEffect(() => {
+    const syncItems = async () => {
+      try {
+        const orgIsRHD = normalizeOrg(selectedOrganizationName) === 'RHD';
+        const targetRegion = orgIsRHD ? (region || '') : (selectedRegion || '');
+        // Filter from parent cache first
+        const fromCache = (items || [])
+          .filter(it => String(it.division_id) === String(selectedDivisionId))
+          .filter(it => normalizeOrg(it.organization) === normalizeOrg(selectedOrganizationName))
+          .filter(it => {
+            if (!targetRegion) return true;
+            return canonRegion(it.region) === canonRegion(targetRegion);
+          });
+        if (fromCache.length > 0) {
+          setModalItems(fromCache);
+          return;
+        }
+        // If no cache match, fetch from backend scoped to org/region
+        setItemsLoading(true);
+        const params = { limit: 10000 };
+        if (targetRegion) params.region = targetRegion;
+        if (selectedOrganizationName) params.organization = selectedOrganizationName;
+        const fetched = await listItems(params);
+        const scoped = (fetched || []).filter(it => String(it.division_id) === String(selectedDivisionId));
+        setModalItems(scoped);
+      } catch (e) {
+        console.error('Failed to load items for selection', e);
+        setModalItems([]);
+      } finally {
+        setItemsLoading(false);
+      }
+    };
+    if (selectedDivisionId && selectedOrganizationName) {
+      syncItems();
+    } else {
+      setModalItems([]);
+    }
+  }, [items, selectedDivisionId, selectedOrganizationName, selectedRegion, region]);
+
   const applyLastForItem = () => {
     try {
       const raw = localStorage.getItem(`lastLineByItem:${region}:${form.item_id}`);
@@ -1221,10 +1374,39 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
         </button>
         <h3 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Add New Line</h3>
-        {region && (
-          <p className="mb-3 text-xs text-gray-600">Showing items for region: <span className="font-medium">{region}</span></p>
+        {(selectedRegion || region) && (
+          <p className="mb-3 text-xs text-gray-600">Showing items for region: <span className="font-medium">{selectedRegion || region}</span></p>
         )}
         <form id="add-line-form" onSubmit={addLine} className="grid grid-cols-1 gap-3 mt-2">
+          {/* Organization first */}
+          <div>
+            <label className="text-xs text-gray-700">Organization</label>
+            <select
+              value={selectedOrganizationName}
+              onChange={(e)=>{ setSelectedOrganizationName(e.target.value); setForm(f=>({...f, item_id: ""})); setSelectedUnit(""); }}
+              className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+            >
+              <option value="">Select Organization</option>
+              {organizations.map(o => (
+                <option key={o.org_id} value={o.name}>{o.name}</option>
+              ))}
+            </select>
+          </div>
+          {/* Region (enabled only for non-RHD organizations) */}
+          <div>
+            <label className="text-xs text-gray-700">Region</label>
+            <select
+              value={selectedRegion}
+              onChange={(e)=>{ setSelectedRegion(e.target.value); setForm(f=>({...f, item_id: ""})); setSelectedUnit(""); }}
+              disabled={normalizeOrg(selectedOrganizationName) === 'RHD'}
+              className={`border ${normalizeOrg(selectedOrganizationName) === 'RHD' ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
+            >
+              <option value="">Select Region</option>
+              {orgRegions.map(r => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          </div>
           {/* Division first */}
           <select value={selectedDivisionId} onChange={(e)=>setSelectedDivisionId(e.target.value)} className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs">
             <option value="">Select Division</option>
@@ -1239,17 +1421,16 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
             onChange={(e)=>{
               const id = e.target.value;
               setForm({ ...form, item_id: id });
-              const it = items.find(x => String(x.item_id) === String(id));
+              const it = modalItems.find(x => String(x.item_id) === String(id));
               const unit = it?.unit || "";
               setSelectedUnit(unit);
               setUnitMode(supportsDualMode(unit) ? 'default' : 'default');
             }}
-            disabled={!selectedDivisionId}
-            className={`border ${!selectedDivisionId ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
+            disabled={!selectedDivisionId || !selectedOrganizationName}
+            className={`border ${(!selectedDivisionId || !selectedOrganizationName) ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
           >
             <option value="">Select Item</option>
-            {items
-              .filter(it => String(it.division_id) === String(selectedDivisionId))
+            {modalItems
               .map(it => (
                 <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>
               ))}

@@ -1,9 +1,9 @@
 import React, { useEffect, useState, useRef } from "react";
 import axios from "axios";
-import { listOrganizations, listRegions, createRegion, deleteRegion, createOrganization, deleteOrganization } from "../api/orgs";
+import { listOrganizations, listRegions, createRegion, deleteRegion, createOrganization, deleteOrganization, updateOrganization, updateRegion } from "../api/orgs";
 import { FaEdit, FaTrash, FaPlus, FaUpload } from "react-icons/fa";
 
-const API = import.meta.env.VITE_API_BASE || "https://rhd-estimation-backend.onrender.com";
+const API = import.meta.env.VITE_API_BASE;
 
 export default function Products() {
   const [isAddDivisionModalOpen, setIsAddDivisionModalOpen] = useState(false);
@@ -16,9 +16,15 @@ export default function Products() {
   const [isManageRegionsOpen, setIsManageRegionsOpen] = useState(false);
   const [newRegionName, setNewRegionName] = useState("");
   const [addRegionError, setAddRegionError] = useState("");
+  const [editingRegionId, setEditingRegionId] = useState(null);
+  const [editingRegionName, setEditingRegionName] = useState("");
+  const [confirmDeleteRegionId, setConfirmDeleteRegionId] = useState(null);
   const [isManageOrganizationsOpen, setIsManageOrganizationsOpen] = useState(false);
   const [newOrgName, setNewOrgName] = useState("");
   const [addOrgError, setAddOrgError] = useState("");
+  const [editingOrgId, setEditingOrgId] = useState(null);
+  const [editingOrgName, setEditingOrgName] = useState("");
+  const [confirmDeleteOrgId, setConfirmDeleteOrgId] = useState(null);
   const [items, setItems] = useState([]);
   const [divisionName, setDivisionName] = useState("");
   const makeInitialRegionRates = React.useCallback((regions) => Object.fromEntries((regions || []).map(r => [r, ""])), []);
@@ -54,6 +60,7 @@ export default function Products() {
   const [importError, setImportError] = useState("");
   const fileInputRef = useRef(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [importBanner, setImportBanner] = useState(null); // { type: 'success'|'warning'|'error'|'info', message: string }
   const [toast, setToast] = useState(null);
   const [addDivisionError, setAddDivisionError] = useState("");
   const [addItemError, setAddItemError] = useState("");
@@ -508,17 +515,20 @@ export default function Products() {
     }
     try {
       setIsImporting(true);
+      setImportBanner({ type: 'info', message: 'Importing item master… This may take a while.' });
       const formData = new FormData();
       formData.append('file', importFile);
-      await axios.post(`${API}/items/import?mode=${importMode}`, formData);
+      const res = await axios.post(`${API}/items/import?mode=${importMode}`, formData);
+      const processed = res?.data?.processed ?? null;
       await fetchItems(selectedOrg?.name);
-      setIsImportModalOpen(false);
+      setImportBanner({ type: 'success', message: processed != null ? `Imported ${processed} item(s) successfully.` : 'Import completed successfully.' });
       setImportFile(null);
       setImportError("");
     } catch (err) {
       console.error('Import failed:', err);
       const msg = err?.response?.data?.detail || 'Import failed. Please check the file format and try again.';
       setImportError(msg);
+      setImportBanner({ type: 'error', message: msg });
     } finally {
       setIsImporting(false);
     }
@@ -541,8 +551,18 @@ export default function Products() {
       }
       return;
     }
+    // Close modal immediately; continue import in background with banner
+    setIsImportModalOpen(false);
     await submitImport();
   };
+
+  // Auto-hide success/warning banners after a while; keep info/error until dismissed
+  useEffect(() => {
+    if (!importBanner) return;
+    if (importBanner.type === 'info' || importBanner.type === 'error') return;
+    const t = setTimeout(() => setImportBanner(null), 8000);
+    return () => clearTimeout(t);
+  }, [importBanner]);
 
   const filteredItems = items.filter(item => {
     const rate = parseFloat(search.rate);
@@ -579,7 +599,7 @@ export default function Products() {
       case 'rate':
         return item.rate;
       case 'region':
-        return (item.region === 'Cumilla Zone' ? 'Comilla Zone' : item.region) ?? '';
+        return item.region;
       default:
         return '';
     }
@@ -722,7 +742,7 @@ export default function Products() {
         rates: {},
       });
     }
-    const normalizedRegion = it.region === 'Cumilla Zone' ? 'Comilla Zone' : it.region;
+    const normalizedRegion = it.region;
     groupedMap.get(key).rates[normalizedRegion] = it.rate;
   }
   const groupedRows = Array.from(groupedMap.values());
@@ -812,7 +832,7 @@ export default function Products() {
     const any = groupItems[0];
   const rates = Object.fromEntries(orgRegions.map(r => [r, '']));
     for (const it of groupItems) {
-      const r = it.region === 'Cumilla Zone' ? 'Comilla Zone' : it.region;
+      const r = it.region;
       rates[r] = it.rate ?? '';
     }
     setEditGroupForm({
@@ -840,7 +860,7 @@ export default function Products() {
   for (const region of orgRegions) {
         const val = editGroupForm.regionRates[region];
         const normalized = region;
-        const existing = groupItems.find(it => (it.region === normalized || (normalized === 'Comilla Zone' && it.region === 'Cumilla Zone')));
+        const existing = groupItems.find(it => it.region === normalized);
         if (existing) {
           ops.push(axios.put(`${API}/items/${existing.item_id}`, { ...base, rate: val !== '' && val != null ? parseFloat(val) : null, region: existing.region }));
         } else if (String(val).trim() !== '') {
@@ -999,6 +1019,15 @@ export default function Products() {
           </button>
         </div>
       </div>
+
+      {importBanner && (
+        <div className={`mt-3 p-3 rounded-md border text-sm ${importBanner.type === 'error' ? 'bg-red-50 text-red-700 border-red-300' : importBanner.type === 'warning' ? 'bg-orange-50 text-orange-700 border-orange-300' : importBanner.type === 'info' ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-emerald-50 text-emerald-700 border-emerald-300'}`}>
+          <div className="flex justify-between items-start">
+            <span>{importBanner.message}</span>
+            <button className="text-xs opacity-70 hover:opacity-100" onClick={() => setImportBanner(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
 
       {isAddDivisionModalOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
@@ -1227,21 +1256,78 @@ export default function Products() {
                   <div className="text-xs text-gray-500">No regions</div>
                 ) : (
                   orgRegionObjs.map(r => (
-                    <div key={r.region_id} className="flex items-center justify-between text-xs py-1">
-                      <span>{r.name}</span>
-                      <button
-                        onClick={async () => {
-                          try {
-                            await deleteRegion(r.region_id);
-                            const regs = await listRegions(selectedOrg.org_id);
-                            setOrgRegionObjs(regs);
-                            setForm(f => ({ ...f, regionRates: makeInitialRegionRates(regs.map(rr => rr.name)) }));
-                          } catch (e) {
-                            console.error('Failed to delete region', e);
-                          }
-                        }}
-                        className="text-red-600 hover:text-red-800"
-                      >Delete</button>
+                    <div key={r.region_id} className="group flex items-center justify-between text-xs py-2 px-2 rounded hover:bg-gray-50 border-b border-gray-100">
+                      {editingRegionId === r.region_id ? (
+                        <input
+                          className="border border-gray-300 p-1 rounded w-2/3 text-xs"
+                          value={editingRegionName}
+                          onChange={(e) => setEditingRegionName(e.target.value)}
+                        />
+                      ) : (
+                        <span className="font-medium text-gray-800">{r.name}</span>
+                      )}
+                      <div className="flex items-center gap-2">
+                        {editingRegionId === r.region_id ? (
+                          <>
+                            <button
+                              onClick={async () => {
+                                const name = editingRegionName.trim();
+                                if (!name) return;
+                                try {
+                                  await updateRegion(r.region_id, name);
+                                  const regs = await listRegions(selectedOrg.org_id);
+                                  setOrgRegionObjs(regs);
+                                  setForm(f => ({ ...f, regionRates: makeInitialRegionRates(regs.map(rr => rr.name)) }));
+                                  setEditingRegionId(null);
+                                  setEditingRegionName("");
+                                } catch (e) {
+                                  console.error('Failed to update region', e);
+                                }
+                              }}
+                              className="text-teal-700 hover:text-teal-900"
+                            >Save</button>
+                            <button
+                              onClick={() => { setEditingRegionId(null); setEditingRegionName(""); }}
+                              className="text-gray-600 hover:text-gray-800"
+                            >Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => { setEditingRegionId(r.region_id); setEditingRegionName(r.name); }}
+                              className="text-gray-700 hover:text-gray-900 inline-flex items-center gap-1"
+                            ><FaEdit className="w-3 h-3" />Edit</button>
+                            <button
+                              onClick={() => setConfirmDeleteRegionId(r.region_id)}
+                              className="text-red-600 hover:text-red-800 inline-flex items-center gap-1"
+                            ><FaTrash className="w-3 h-3" />Delete</button>
+                          </>
+                        )}
+                      </div>
+                      {confirmDeleteRegionId === r.region_id && (
+                        <div className="mt-2 w-full text-[11px] text-gray-700">
+                          <div className="flex items-center justify-between bg-red-50 border border-red-200 rounded p-2">
+                            <span>Delete region \"{r.name}\"?</span>
+                            <div className="flex gap-2">
+                              <button onClick={() => setConfirmDeleteRegionId(null)} className="text-gray-700 hover:text-gray-900">Cancel</button>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await deleteRegion(r.region_id);
+                                    setConfirmDeleteRegionId(null);
+                                    const regs = await listRegions(selectedOrg.org_id);
+                                    setOrgRegionObjs(regs);
+                                    setForm(f => ({ ...f, regionRates: makeInitialRegionRates(regs.map(rr => rr.name)) }));
+                                  } catch (e) {
+                                    console.error('Failed to delete region', e);
+                                  }
+                                }}
+                                className="text-red-700 hover:text-red-900 font-semibold"
+                              >Confirm</button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
@@ -1279,22 +1365,78 @@ export default function Products() {
                   <div className="text-xs text-gray-500">No organizations</div>
                 ) : (
                   organizations.map(o => (
-                    <div key={o.org_id} className="flex items-center justify-between text-xs py-1">
-                      <button className="text-left" onClick={() => changeOrganization(o.org_id)}>{o.name}</button>
-                      <button
-                        onClick={async () => {
-                          try {
-                            await deleteOrganization(o.org_id);
-                            const orgs = await listOrganizations();
-                            setOrganizations(orgs);
-                            const newSel = orgs.find(x => x.org_id === selectedOrg?.org_id) || orgs[0] || null;
-                            await changeOrganization(newSel?.org_id || "");
-                          } catch (e) {
-                            console.error('Failed to delete organization', e);
-                          }
-                        }}
-                        className="text-red-600 hover:text-red-800"
-                      >Delete</button>
+                    <div key={o.org_id} className="group flex items-center justify-between text-xs py-2 px-2 rounded hover:bg-gray-50 border-b border-gray-100">
+                      {editingOrgId === o.org_id ? (
+                        <input
+                          className="border border-gray-300 p-1 rounded w-2/3 text-xs"
+                          value={editingOrgName}
+                          onChange={(e) => setEditingOrgName(e.target.value)}
+                        />
+                      ) : (
+                        <button className="text-left font-medium text-gray-800" onClick={() => changeOrganization(o.org_id)}>{o.name}</button>
+                      )}
+                      <div className="flex items-center gap-2">
+                        {editingOrgId === o.org_id ? (
+                          <>
+                            <button
+                              onClick={async () => {
+                                const name = editingOrgName.trim();
+                                if (!name) return;
+                                try {
+                                  await updateOrganization(o.org_id, name);
+                                  const orgs = await listOrganizations();
+                                  setOrganizations(orgs);
+                                  setEditingOrgId(null);
+                                  setEditingOrgName("");
+                                } catch (e) {
+                                  console.error('Failed to update organization', e);
+                                }
+                              }}
+                              className="text-teal-700 hover:text-teal-900"
+                            >Save</button>
+                            <button
+                              onClick={() => { setEditingOrgId(null); setEditingOrgName(""); }}
+                              className="text-gray-600 hover:text-gray-800"
+                            >Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => { setEditingOrgId(o.org_id); setEditingOrgName(o.name); }}
+                              className="text-gray-700 hover:text-gray-900 inline-flex items-center gap-1"
+                            ><FaEdit className="w-3 h-3" />Edit</button>
+                            <button
+                              onClick={() => setConfirmDeleteOrgId(o.org_id)}
+                              className="text-red-600 hover:text-red-800 inline-flex items-center gap-1"
+                            ><FaTrash className="w-3 h-3" />Delete</button>
+                          </>
+                        )}
+                      </div>
+                      {confirmDeleteOrgId === o.org_id && (
+                        <div className="mt-2 w-full text-[11px] text-gray-700">
+                          <div className="flex items-center justify-between bg-red-50 border border-red-200 rounded p-2">
+                            <span>Delete organization \"{o.name}\"?</span>
+                            <div className="flex gap-2">
+                              <button onClick={() => setConfirmDeleteOrgId(null)} className="text-gray-700 hover:text-gray-900">Cancel</button>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await deleteOrganization(o.org_id);
+                                    setConfirmDeleteOrgId(null);
+                                    const orgs = await listOrganizations();
+                                    setOrganizations(orgs);
+                                    const newSel = orgs.find(x => x.org_id === selectedOrg?.org_id) || orgs[0] || null;
+                                    await changeOrganization(newSel?.org_id || "");
+                                  } catch (e) {
+                                    console.error('Failed to delete organization', e);
+                                  }
+                                }}
+                                className="text-red-700 hover:text-red-900 font-semibold"
+                              >Confirm</button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
