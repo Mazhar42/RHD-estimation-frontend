@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from "react";
 import { FaPlus, FaTrash, FaEdit, FaFileExcel, FaFileCsv, FaUpload, FaFilePdf } from "react-icons/fa";
 import axios from "axios";
-import { listDivisions, listItems } from "../api/items";
+import { listDivisions, listItems, createItem } from "../api/items";
 import { API_BASE as API } from "../api/base";
 import { listOrganizations, listRegions } from "../api/orgs";
 import { useParams, useSearchParams } from "react-router-dom";
@@ -32,6 +32,7 @@ export default function EstimationDetail() {
   const [importFile, setImportFile] = useState(null);
   const [importError, setImportError] = useState("");
   const [isImporting, setIsImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(0); // 0-100
   const [importMode, setImportMode] = useState("append");
   const [importBanner, setImportBanner] = useState(null); // { type: 'success'|'warning'|'error', message: string }
   const downloadMenuRef = useRef(null);
@@ -46,6 +47,7 @@ export default function EstimationDetail() {
     }
     try {
       setIsImporting(true);
+      setImportProgress(0);
       const filename = importFile.name || '';
       const ext = filename.split('.').pop()?.toLowerCase() || '';
       if (!['xlsx','xlsm','csv'].includes(ext)) {
@@ -169,9 +171,16 @@ export default function EstimationDetail() {
       let skippedCount = 0;
       let missingItemCount = 0;
       let apiErrorCount = 0;
+      let processedRows = 0;
 
       // Start parsing below header if found; else scan entire sheet
       const startIdx = headerRowIndex >= 0 ? headerRowIndex + 1 : 0;
+      const candidateRows = rows.slice(startIdx).filter((row) => {
+        if (!row || row.length === 0) return false;
+        if (row.length === 1 || isTotalLikeRow(row)) return false;
+        return true;
+      });
+      const totalRows = candidateRows.length || 1;
       for (let ri = startIdx; ri < rows.length; ri++) {
         const row = rows[ri];
         if (!row || row.length === 0) continue;
@@ -190,7 +199,10 @@ export default function EstimationDetail() {
 
         // Find item by code or description
         const item = findItemForRow(codeCell, descCell);
-        if (!item) { skippedCount++; missingItemCount++; continue; }
+        if (!item) { skippedCount++; missingItemCount++; processedRows++; setImportProgress(Math.round((processedRows/totalRows)*100)); continue; }
+        // Skip if item has no valid rate (blank or non-positive)
+        const hasRate = Number.isFinite(Number(item.rate)) && Number(item.rate) > 0;
+        if (!hasRate) { skippedCount++; processedRows++; setImportProgress(Math.round((processedRows/totalRows)*100)); continue; }
 
         const payload = {
           item_id: item.item_id,
@@ -210,6 +222,8 @@ export default function EstimationDetail() {
           skippedCount++;
           apiErrorCount++;
         }
+        processedRows++;
+        setImportProgress(Math.round((processedRows/totalRows)*100));
       }
 
       await fetchLines();
@@ -220,11 +234,12 @@ export default function EstimationDetail() {
         setImportError(`Could not import any rows. ${reason}.`);
         setImportBanner({ type: 'error', message: `Import failed: ${reason}. Check region selection and item codes/descriptions.` });
       } else {
-        const details = skippedCount ? `Imported ${importedCount}, skipped ${skippedCount} (missing items: ${missingItemCount}${apiErrorCount ? `, API errors: ${apiErrorCount}` : ''}).` : `Imported ${importedCount} row(s).`;
+        const details = skippedCount ? `Imported ${importedCount}, skipped ${skippedCount} (missing items or rate: ${missingItemCount}${apiErrorCount ? `, API errors: ${apiErrorCount}` : ''}).` : `Imported ${importedCount} row(s).`;
         setImportBanner({ type: skippedCount ? 'warning' : 'success', message: details });
         setIsImportModalOpen(false);
         setImportFile(null);
         setImportError("");
+        setImportProgress(0);
       }
     } catch (err) {
       console.error('Import failed:', err);
@@ -241,9 +256,7 @@ export default function EstimationDetail() {
       if (fileInputRef.current) fileInputRef.current.click();
       return;
     }
-    // Close modal and show progress banner; continue import in background
-    setIsImportModalOpen(false);
-    setImportBanner({ type: 'info', message: 'Importing estimation lines… This may take a while.' });
+    // Keep modal open and show inline progress; block interactions
     await submitImportLines();
   };
 
@@ -276,7 +289,7 @@ export default function EstimationDetail() {
       // If no regionFilter is provided, fetch ALL items irrespective of current estimation region.
       const fetchAll = typeof regionFilter === 'undefined';
       if (fetchAll) {
-        const res = await axios.get(`${API}/items`, { params: { limit: 10000 } });
+        const res = await axios.get(`${API}/items`, { params: { limit: 1000000 } });
         const all = res.data || [];
         const seen = new Set();
         const dedup = all.filter((it) => {
@@ -305,7 +318,7 @@ export default function EstimationDetail() {
 
       let all = [];
       for (const r of regionsToFetch) {
-        const params = { limit: 10000 };
+        const params = { limit: 1000000 };
         if (r) params.region = r;
         const res = await axios.get(`${API}/items`, { params });
         all = all.concat(res.data || []);
@@ -944,7 +957,8 @@ export default function EstimationDetail() {
             <button
               type="button"
               onClick={() => setIsImportModalOpen(false)}
-              className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition"
+              disabled={isImporting}
+              className={`absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full ${isImporting ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900'} transition`}
               aria-label="Close import modal"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -1044,6 +1058,14 @@ export default function EstimationDetail() {
                   {isImporting ? 'Importing…' : 'Import'}
                 </button>
               </div>
+              {isImporting && (
+                <div className="mt-3">
+                  <div className="h-2 bg-gray-200 rounded">
+                    <div className="h-2 bg-indigo-600 rounded" style={{ width: `${importProgress || 10}%`, transition: 'width 200ms' }}></div>
+                  </div>
+                  <div className="mt-1 text-[11px] text-gray-600">Processing rows… {importProgress}%</div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1152,24 +1174,55 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
   const [selectedFileName, setSelectedFileName] = useState("");
   const fileInputRef = useRef(null);
 
+  // Special Item new item creation state
+  const [newItemName, setNewItemName] = useState("");
+  const [newItemRate, setNewItemRate] = useState("");
+  const [newItemUnit, setNewItemUnit] = useState("");
+
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
   const addLine = async (e) => {
     e.preventDefault();
-    if (!form.item_id) return;
-    // Determine allowed fields by unit
-    const allowed = allowedInputsForUnit(selectedUnit, unitMode);
-    const sanitize = (key, val) => (allowed.includes(key) ? val : null);
-    // Determine selected division name from fetched divisions
     const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name || "";
-    // Enforce attachment requirements for Special Item
+
+    let finalItemId = form.item_id;
+
     if (selectedDivisionName === 'Special Item') {
-      if (!attachmentBase64) {
-        setSubmitError('Attachment is required for Special Item.');
-        return;
-      }
+        if (!newItemName) {
+            setSubmitError('Item Description is required for Special Item.');
+            return;
+        }
+        if (!attachmentBase64) {
+            setSubmitError('Attachment is required for Special Item.');
+            return;
+        }
+        
+        try {
+            setIsSubmitting(true);
+            const newItemPayload = {
+               division_id: parseInt(selectedDivisionId),
+               item_code: `SP-${Date.now()}`,
+               item_description: newItemName,
+               unit: newItemUnit,
+               rate: parseFloat(newItemRate) || 0,
+               region: selectedRegion || region || "Default",
+               organization: selectedOrganizationName || "RHD"
+            };
+            const createdItem = await createItem(newItemPayload);
+            finalItemId = createdItem.item_id;
+        } catch (err) {
+            setIsSubmitting(false);
+            setSubmitError('Failed to create special item: ' + (err?.response?.data?.detail || err.message));
+            return;
+        }
+    } else {
+        if (!form.item_id) return;
     }
-    // Generate unique attachment name if missing or duplicate
+
+    const unitForCheck = selectedDivisionName === 'Special Item' ? newItemUnit : selectedUnit;
+    const allowed = allowedInputsForUnit(unitForCheck, unitMode);
+    const sanitize = (key, val) => (allowed.includes(key) ? val : null);
+
     const existingNames = (lines || []).map(l => l.attachment_name).filter(Boolean);
     const formatName = (n) => `A-${String(n).padStart(2,'0')}`;
     const nextUniqueName = () => {
@@ -1182,26 +1235,44 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
       if (!finalAttachmentName) {
         finalAttachmentName = nextUniqueName();
       } else if (existingNames.includes(finalAttachmentName)) {
-        // If user-provided name collides, auto-bump to next free
         finalAttachmentName = nextUniqueName();
       }
+      
+      // Ensure extension matches the uploaded file
+      if (selectedFileName && selectedFileName.includes('.')) {
+          const ext = selectedFileName.split('.').pop();
+          if (ext && !finalAttachmentName.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) {
+              finalAttachmentName += `.${ext}`;
+          }
+      }
     }
+
     const payload = {
-      item_id: parseInt(form.item_id),
+      item_id: parseInt(finalItemId),
       sub_description: form.sub_description || null,
       no_of_units: sanitize('no_of_units', parseInt(form.no_of_units || 1)),
       length: sanitize('length', form.length ? parseFloat(form.length) : null),
       width: sanitize('width', form.width ? parseFloat(form.width) : null),
       thickness: sanitize('thickness', form.thickness ? parseFloat(form.thickness) : null),
       quantity: sanitize('quantity', form.quantity ? parseFloat(form.quantity) : null),
-      // Attachments only for Special Item division
       attachment_name: selectedDivisionName === 'Special Item' && attachmentBase64 ? finalAttachmentName : null,
       attachment_base64: selectedDivisionName === 'Special Item' && attachmentBase64 ? attachmentBase64 : null,
     };
+
     try {
-      setIsSubmitting(true);
+      if (selectedDivisionName !== 'Special Item') setIsSubmitting(true);
       setSubmitError("");
       await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
+      
+      if (selectedDivisionName === 'Special Item') {
+          setNewItemName("");
+          setNewItemRate("");
+          setNewItemUnit("");
+          setAttachmentName("");
+          setAttachmentBase64("");
+          setSelectedFileName("");
+      }
+
       onSave();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to add line. Please check inputs.';
@@ -1210,12 +1281,11 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
     } finally {
       setIsSubmitting(false);
     }
-    // remember last template for this item + region
+    
     try {
-      localStorage.setItem(`lastLineByItem:${region}:${form.item_id}` , JSON.stringify(form));
+      if (form.item_id) localStorage.setItem(`lastLineByItem:${region}:${form.item_id}` , JSON.stringify(form));
     } catch {}
     if (keepOpen) {
-      // leave modal open and keep values for quick repeat
       setForm((f) => ({ ...f }));
     } else {
       onClose();
@@ -1274,7 +1344,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
         }
         // If no cache match, fetch from backend scoped to org/region
         setItemsLoading(true);
-        const params = { limit: 10000 };
+        const params = { limit: 1000000 };
         if (targetRegion) params.region = targetRegion;
         if (selectedOrganizationName) params.organization = selectedOrganizationName;
         const fetched = await listItems(params);
@@ -1366,7 +1436,9 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
     }
   };
 
-  const allowedInputs = allowedInputsForUnit(selectedUnit, unitMode);
+  const isSpecialItem = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item';
+  const unitForInputs = isSpecialItem ? newItemUnit : selectedUnit;
+  const allowedInputs = allowedInputsForUnit(unitForInputs, unitMode);
 
   return (
     <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
@@ -1416,30 +1488,66 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
             ))}
           </select>
           {/* Item filtered by division */}
-          <select
-            name="item_id"
-            value={form.item_id}
-            onChange={(e)=>{
-              const id = e.target.value;
-              setForm({ ...form, item_id: id });
-              const it = modalItems.find(x => String(x.item_id) === String(id));
-              const unit = it?.unit || "";
-              setSelectedUnit(unit);
-              setUnitMode(supportsDualMode(unit) ? 'default' : 'default');
-            }}
-            disabled={!selectedDivisionId || !selectedOrganizationName}
-            className={`border ${(!selectedDivisionId || !selectedOrganizationName) ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
-          >
-            <option value="">Select Item</option>
-            {modalItems
-              .map(it => (
-                <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>
-              ))}
-          </select>
+          {(() => {
+             const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name;
+             if (selectedDivisionName === 'Special Item') {
+                 return (
+                     <div className="grid grid-cols-1 gap-2">
+                        <input
+                            type="text"
+                            value={newItemName}
+                            onChange={(e) => setNewItemName(e.target.value)}
+                            placeholder="Item Name / Description"
+                            className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                        />
+                         <div className="grid grid-cols-2 gap-2">
+                            <input
+                                type="number"
+                                value={newItemRate}
+                                onChange={(e) => setNewItemRate(e.target.value)}
+                                placeholder="Rate"
+                                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                            />
+                             <input
+                                type="text"
+                                value={newItemUnit}
+                                onChange={(e) => setNewItemUnit(e.target.value)}
+                                placeholder="Unit (e.g. LS, m2)"
+                                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                            />
+                        </div>
+                    </div>
+                 );
+             }
+             return (
+              <select
+                name="item_id"
+                value={form.item_id}
+                onChange={(e)=>{
+                  const id = e.target.value;
+                  setForm({ ...form, item_id: id });
+                  const it = modalItems.find(x => String(x.item_id) === String(id));
+                  const unit = it?.unit || "";
+                  setSelectedUnit(unit);
+                  setUnitMode(supportsDualMode(unit) ? 'default' : 'default');
+                }}
+                disabled={!selectedDivisionId || !selectedOrganizationName}
+                className={`border ${(!selectedDivisionId || !selectedOrganizationName) ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
+              >
+                <option value="">Select Item</option>
+                {modalItems
+                  .map(it => (
+                    <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>
+                  ))}
+              </select>
+             );
+          })()}
           {/* Unit + mode */}
-          {form.item_id && (
+          {(form.item_id || (divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item')) && (
             <div className="flex items-center justify-between gap-2 text-xs">
-              <div className="text-gray-800"><span className="font-semibold text-sm">Unit:</span> <span className="font-bold text-sm">{selectedUnit || '—'}</span></div>
+              <div className="text-gray-800"><span className="font-semibold text-sm">Unit:</span> <span className="font-bold text-sm">
+                  {divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item' ? (newItemUnit || '—') : (selectedUnit || '—')}
+              </span></div>
               {supportsDualMode(selectedUnit) && (
                 <div className="flex items-center gap-2">
                   <span className="text-gray-600">Calculation:</span>
@@ -1557,7 +1665,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
               disabled={isSubmitting}
               className={`${isSubmitting ? 'opacity-70 cursor-not-allowed' : ''} bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs`}
             >
-              {isSubmitting ? 'Adding…' : 'Add Line'}
+              {isSubmitting ? 'Adding…' : (divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item' ? 'Submit Item' : 'Add Line')}
             </button>
           </div>
         </form>

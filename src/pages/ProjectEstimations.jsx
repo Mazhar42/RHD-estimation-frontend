@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
 import { API_BASE as API } from "../api/base";
+import { listOrganizations, listRegions } from "../api/orgs";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { FaTrash, FaPlus, FaEdit } from "react-icons/fa";
 
@@ -37,8 +38,18 @@ export default function ProjectEstimations() {
 
   const fetchRegions = async () => {
     try {
-      const res = await axios.get(`${API}/items`, { params: { limit: 10000 } });
-      const unique = Array.from(new Set(res.data.map(it => it.region))).filter(Boolean).sort();
+      // Prefer authoritative list of regions from the RHD organization
+      const orgs = await listOrganizations();
+      const rhd = (orgs || []).find(o => (o.name || '').toUpperCase() === 'RHD');
+      if (rhd) {
+        const regs = await listRegions(rhd.org_id);
+        const names = (regs || []).map(r => r.name).filter(Boolean).sort();
+        setRegions(names);
+        return;
+      }
+      // Fallback: derive regions from items but restrict to organization=RHD
+      const res = await axios.get(`${API}/items`, { params: { limit: 1000000, organization: 'RHD' } });
+      const unique = Array.from(new Set((res.data || []).map(it => it.region))).filter(Boolean).sort();
       setRegions(unique);
     } catch (e) {
       console.error('Failed to load regions', e);

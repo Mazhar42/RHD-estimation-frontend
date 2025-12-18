@@ -61,6 +61,7 @@ export default function Products() {
   const [importError, setImportError] = useState("");
   const fileInputRef = useRef(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [importBanner, setImportBanner] = useState(null); // { type: 'success'|'warning'|'error'|'info', message: string }
   const [toast, setToast] = useState(null);
   const [addDivisionError, setAddDivisionError] = useState("");
@@ -320,7 +321,7 @@ export default function Products() {
   };
   const fetchItems = async (organizationName) => {
     // Request a larger limit so the UI reflects full imports; include organization filter if provided
-    const params = { limit: 10000 };
+    const params = { limit: 1000000 };
     if (organizationName) params.organization = organizationName;
     const res = await axios.get(`${API}/items`, { params });
     setItems(res.data);
@@ -487,7 +488,6 @@ export default function Products() {
   const exportCSV = async () => {
     // Generate template CSV with headers only (no data)
     const headers = [
-      "SI. No",
       "Item Code",
       "Division",
       "Description",
@@ -516,15 +516,23 @@ export default function Products() {
     }
     try {
       setIsImporting(true);
-      setImportBanner({ type: 'info', message: 'Importing item master… This may take a while.' });
+      setImportBanner({ type: 'info', message: 'Importing item master… Please wait.' });
       const formData = new FormData();
       formData.append('file', importFile);
-      const res = await axios.post(`${API}/items/import?mode=${importMode}`, formData);
+      const res = await axios.post(`${API}/items/import?mode=${importMode}`, formData, {
+        onUploadProgress: (evt) => {
+          if (!evt.total) return;
+          const pct = Math.round((evt.loaded / evt.total) * 100);
+          setUploadProgress(pct);
+        }
+      });
       const processed = res?.data?.processed ?? null;
+      const skipped = res?.data?.skipped ?? 0;
       await fetchItems(selectedOrg?.name);
-      setImportBanner({ type: 'success', message: processed != null ? `Imported ${processed} item(s) successfully.` : 'Import completed successfully.' });
+      setImportBanner({ type: skipped > 0 ? 'warning' : 'success', message: processed != null ? `Imported ${processed} item(s) successfully${skipped ? `, skipped ${skipped} (no rate).` : '.'}` : 'Import completed successfully.' });
       setImportFile(null);
       setImportError("");
+      setUploadProgress(0);
     } catch (err) {
       console.error('Import failed:', err);
       const msg = err?.response?.data?.detail || 'Import failed. Please check the file format and try again.';
@@ -552,8 +560,7 @@ export default function Products() {
       }
       return;
     }
-    // Close modal immediately; continue import in background with banner
-    setIsImportModalOpen(false);
+    // Keep modal open; block interactions until import completes
     await submitImport();
   };
 
@@ -1464,7 +1471,7 @@ export default function Products() {
       {isImportModalOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
           <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
-            <button onClick={() => setIsImportModalOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
+            <button onClick={() => setIsImportModalOpen(false)} disabled={isImporting} className={`absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full ${isImporting ? 'bg-gray-200 text-gray-400 cursor-not-allowed' : 'bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900'} transition`}>
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
             <h2 className="text-xl sm:text-2xl font-semibold mb-2 text-gray-900">Import Item Master</h2>
@@ -1561,6 +1568,14 @@ export default function Products() {
                   {isImporting ? 'Importing…' : 'Import'}
                 </button>
               </div>
+              {isImporting && (
+                <div className="mt-3">
+                  <div className="h-2 bg-gray-200 rounded">
+                    <div className="h-2 bg-teal-600 rounded" style={{ width: `${uploadProgress || 10}%`, transition: 'width 200ms' }}></div>
+                  </div>
+                  <div className="mt-1 text-[11px] text-gray-600">{uploadProgress ? `Uploading… ${uploadProgress}%` : 'Processing file…'}</div>
+                </div>
+              )}
             </div>
           </div>
         </div>

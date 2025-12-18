@@ -23,4 +23,3 @@ function resolveApiBase() {
 }
 
 export const API_BASE = resolveApiBase();
-

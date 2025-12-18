@@ -11,6 +11,11 @@ export const listItems = async (params = {}) => {
   return res.data;
 };
 
+export const createItem = async (payload) => {
+  const res = await axios.post(`${API_BASE}/items`, payload);
+  return res.data;
+};
+
 export const importItems = async (file, mode = "append") => {
   const form = new FormData();
   form.append("file", file);
