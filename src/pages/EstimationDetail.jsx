@@ -1,22 +1,98 @@
 import React, { useEffect, useState, useRef } from "react";
-import { FaPlus, FaTrash, FaEdit, FaFileExcel, FaFileCsv, FaUpload, FaFilePdf } from "react-icons/fa";
-import axios from "axios";
-import { listDivisions, listItems, createItem } from "../api/items";
-import { API_BASE as API } from "../api/base";
+import { FaPlus, FaTrash, FaEdit, FaFileExcel, FaFileCsv, FaUpload, FaFilePdf, FaExclamationTriangle, FaCheck, FaCopy } from "react-icons/fa";
+import { listDivisions, listItems } from "../api/items";
 import { listOrganizations, listRegions } from "../api/orgs";
+import {
+  listEstimationLines,
+  createEstimationLine,
+  updateEstimationLine,
+  deleteEstimationLines,
+  getEstimationTotal,
+  getEstimation,
+  listSpecialItemRequests,
+  approveSpecialItemRequest,
+  rejectSpecialItemRequest,
+  createSpecialItemRequest,
+} from "../api/estimations";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { useAuth } from "../hooks/useAuth.js";
 
-// API base is now provided by centralized resolver
+const parseDimensionInput = (raw) => {
+  const text = String(raw ?? "").trim();
+  if (!text) return { value: null, expr: null, error: null };
+  
+  // Normalize unicode fractions and common math symbols
+  let cleaned = text.replace(/\s+/g, "");
+  
+  // Replace common multiplication symbols
+  cleaned = cleaned.replace(/[xX×]/g, "*");
+
+  cleaned = cleaned.replace(/½/g, "(1/2)")
+                   .replace(/⅓/g, "(1/3)")
+                   .replace(/⅔/g, "(2/3)")
+                   .replace(/¼/g, "(1/4)")
+                   .replace(/¾/g, "(3/4)")
+                   .replace(/⅕/g, "(1/5)")
+                   .replace(/⅖/g, "(2/5)")
+                   .replace(/⅗/g, "(3/5)")
+                   .replace(/⅘/g, "(4/5)")
+                   .replace(/⅙/g, "(1/6)")
+                   .replace(/⅚/g, "(5/6)")
+                   .replace(/⅛/g, "(1/8)")
+                   .replace(/⅜/g, "(3/8)")
+                   .replace(/⅝/g, "(5/8)")
+                   .replace(/⅞/g, "(7/8)");
+
+  // Insert explicit multiplication for implicit cases:
+  // 1. digit/parenthesis followed by parenthesis: 2(3) -> 2*(3), (2)(3) -> (2)*(3)
+  // 2. parenthesis followed by digit: (2)3 -> (2)*3
+  // Repeatedly apply to handle nested/chained cases correctly
+  cleaned = cleaned.replace(/(\d|\))(?=\()/g, "$1*");
+  cleaned = cleaned.replace(/(\))(?=\d)/g, "$1*");
+
+  const hasOperator = /[+\-*/()]/.test(cleaned);
+  const isNumber = /^-?(?:\d+(\.\d+)?|\.\d+)$/.test(cleaned);
+  
+  if (isNumber) return { value: Number(cleaned), expr: hasOperator ? text : null, error: null };
+  
+  // Allow numbers, standard operators, and parentheses
+  if (!/^[0-9+\-*/().]+$/.test(cleaned) || cleaned.includes("..")) {
+    return { value: null, expr: null, error: "Invalid expression" };
+  }
+  
+  try {
+    const result = Function(`"use strict"; return (${cleaned})`)();
+    if (!Number.isFinite(result)) return { value: null, expr: null, error: "Invalid expression" };
+    // Return original text as expression to preserve user formatting, unless it was just a number
+    return { value: Number(result), expr: text, error: null };
+  } catch {
+    return { value: null, expr: null, error: "Invalid expression" };
+  }
+};
+
+const getInitialDimensionValue = (expr, value) => {
+  if (expr !== null && expr !== undefined && String(expr).trim() !== "") return expr;
+  if (value === null || value === undefined) return "";
+  return value;
+};
 
 export default function EstimationDetail() {
   const { estimationId } = useParams();
+  const { hasRole, user } = useAuth();
+  const isAdmin = hasRole("admin") || hasRole("superadmin");
+  const [estimation, setEstimation] = useState(null);
+  const isOwner = estimation?.created_by_id === user?.user_id;
+  const canEdit = isAdmin || isOwner;
   const [searchParams, setSearchParams] = useSearchParams();
   const [lines, setLines] = useState([]);
   const [items, setItems] = useState([]);
   const [total, setTotal] = useState(0);
+  const [specialRequests, setSpecialRequests] = useState([]);
+  const [specialRequestsLoading, setSpecialRequestsLoading] = useState(false);
+  const [specialRequestsError, setSpecialRequestsError] = useState("");
   const [selectedLineIds, setSelectedLineIds] = useState([]);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isAddLineModalOpen, setIsAddLineModalOpen] = useState(false);
@@ -38,7 +114,220 @@ export default function EstimationDetail() {
   const downloadMenuRef = useRef(null);
   const fileInputRef = useRef(null);
   const [isImportDragging, setIsImportDragging] = useState(false);
+  const [equationView, setEquationView] = useState({});
+  const [isEditingEnabled, setIsEditingEnabled] = useState(false);
+  const [inlineEditingCell, setInlineEditingCell] = useState(null); // { lineId, field }
+  const [inlineValue, setInlineValue] = useState("");
+  const [columnWidths, setColumnWidths] = useState(() => {
+    try {
+      const saved = localStorage.getItem("estimationColumnWidths");
+      return saved ? JSON.parse(saved) : { item_code: 150, description: 250, sub_description: 150 };
+    } catch {
+      return { item_code: 150, description: 250, sub_description: 150 };
+    }
+  });
+  
+  useEffect(() => {
+    try {
+      localStorage.setItem("estimationColumnWidths", JSON.stringify(columnWidths));
+    } catch {}
+  }, [columnWidths]);
+
+  const resizingRef = useRef(null); // { column, startX, startWidth }
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!resizingRef.current) return;
+      const { column, startX, startWidth } = resizingRef.current;
+      const diff = e.clientX - startX;
+      setColumnWidths(prev => ({
+        ...prev,
+        [column]: Math.max(50, startWidth + diff)
+      }));
+    };
+
+    const handleMouseUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = null;
+        document.body.style.cursor = 'default';
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  const startResizing = (e, column) => {
+    e.preventDefault();
+    resizingRef.current = {
+      column,
+      startX: e.clientX,
+      startWidth: columnWidths[column]
+    };
+    document.body.style.cursor = 'col-resize';
+  };
+
+  const uniqueItemsByDivision = React.useMemo(() => {
+    const map = {}; // divisionId -> { byCode: [], byDesc: [] }
+    items.forEach(it => {
+        const divId = it.division_id;
+        if (!divId) return;
+        if (!map[divId]) {
+            map[divId] = { codes: new Map(), descs: new Map() };
+        }
+        if (!map[divId].codes.has(it.item_code)) {
+            map[divId].codes.set(it.item_code, it);
+        }
+        if (!map[divId].descs.has(it.item_description)) {
+            map[divId].descs.set(it.item_description, it);
+        }
+    });
+    
+    // Convert Maps to Arrays
+    const result = {};
+    Object.keys(map).forEach(divId => {
+        result[divId] = {
+            byCode: Array.from(map[divId].codes.values()),
+            byDesc: Array.from(map[divId].descs.values())
+        };
+    });
+    return result;
+  }, [items]);
+
+  const hasDimensions = (l) => {
+    const hasVal = (v) => v != null && v !== "";
+    const hasExpr = (e) => e && String(e).trim() !== "";
+    return hasVal(l.length) || hasExpr(l.length_expr) ||
+           hasVal(l.width) || hasExpr(l.width_expr) ||
+           hasVal(l.thickness) || hasExpr(l.thickness_expr) ||
+           hasExpr(l.no_of_units_expr);
+  };
+
+  const handleInlineSave = async () => {
+    if (!inlineEditingCell) return;
+    const { lineId, field } = inlineEditingCell;
+    const line = lines.find(l => l.line_id === lineId);
+    if (!line) return;
+
+    let payload = {
+        item_id: line.item_id,
+        sub_description: line.sub_description,
+        no_of_units: line.no_of_units,
+        length: line.length,
+        width: line.width,
+        thickness: line.thickness,
+        length_expr: line.length_expr,
+        width_expr: line.width_expr,
+        thickness_expr: line.thickness_expr,
+        quantity: line.quantity,
+    };
+
+    let hasChanges = false;
+
+    if (field === 'item_id' || field === 'item_code' || field === 'description') {
+        const newItemId = parseInt(inlineValue);
+        if (newItemId !== line.item_id) {
+            payload.item_id = newItemId;
+            hasChanges = true;
+        }
+    } else if (field === 'sub_description') {
+        if (inlineValue !== line.sub_description) {
+            payload.sub_description = inlineValue;
+            hasChanges = true;
+        }
+    } else if (['length', 'width', 'thickness', 'no_of_units'].includes(field)) {
+        const res = parseDimensionInput(inlineValue);
+        if (res.error) { alert(res.error); return; }
+        
+        const currentVal = line[field];
+        const currentExpr = line[`${field}_expr`];
+        // Compare loosely or check if result changed
+        // If user typed same expression, res.expr == currentExpr
+        // If user typed same value, res.value == currentVal
+        if (res.value !== currentVal || (res.expr || null) !== (currentExpr || null)) {
+            payload[field] = res.value;
+            payload[`${field}_expr`] = res.expr;
+            hasChanges = true;
+        }
+    } else if (field === 'quantity') {
+        const newQty = parseFloat(inlineValue) || null;
+        if (newQty !== line.quantity) {
+            payload.quantity = newQty;
+            hasChanges = true;
+        }
+    }
+
+    if (!hasChanges) {
+        setInlineEditingCell(null);
+        setInlineValue("");
+        return;
+    }
+
+    try {
+        await updateEstimationLine(lineId, payload);
+        setInlineEditingCell(null);
+        setInlineValue("");
+        fetchLines();
+    } catch (e) {
+        console.error("Failed to save inline edit", e);
+        alert("Failed to save: " + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const handleInlineKeyDown = (e) => {
+    if (e.key === 'Enter') {
+        handleInlineSave();
+    } else if (e.key === 'Escape') {
+        setInlineEditingCell(null);
+        setInlineValue("");
+    }
+  };
+
+  const handleCellDoubleClick = (line, field) => {
+    if (!isEditingEnabled) return;
+    setInlineEditingCell({ lineId: line.line_id, field });
+    
+    // For dimensions, we might want the expression if available
+    if (['length', 'width', 'thickness', 'no_of_units'].includes(field)) {
+       const exprKey = `${field}_expr`;
+       const val = line[exprKey] ? line[exprKey] : line[field];
+       setInlineValue(val);
+    } else if (field === 'item_id') {
+       // For item selection, we use item_id as the value
+       setInlineValue(line.item_id);
+    } else {
+       setInlineValue(line[field]);
+    }
+  };
   const estimationTitle = localStorage.getItem(`estimationName:${estimationId}`) || `Estimation #${estimationId}`;
+  const toggleEquationView = (lineId, field) => {
+    const key = `${lineId}:${field}`;
+    setEquationView(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+  const renderDimensionCell = (line, field) => {
+    // For no_of_units, the expr field is 'no_of_units_expr'
+    const exprKey = field === 'no_of_units' ? 'no_of_units_expr' : `${field}_expr`;
+    const expr = line?.[exprKey];
+    const value = line?.[field];
+    if (!expr) return value ?? "";
+    const key = `${line.line_id}:${field}`;
+    const showExpr = Boolean(equationView[key]);
+    const display = showExpr ? expr : (value ?? "");
+    return (
+      <button
+        type="button"
+        onClick={() => toggleEquationView(line.line_id, field)}
+        className="w-full text-left rounded border border-teal-200 bg-teal-50 text-teal-900 px-2 py-1 text-xs hover:bg-teal-100"
+        title={showExpr ? "Show value" : "Show equation"}
+      >
+        {display}
+      </button>
+    );
+  };
 
   const submitImportLines = async () => {
     if (!importFile) {
@@ -58,7 +347,7 @@ export default function EstimationDetail() {
       // Optional replace: clear existing lines
       if (importMode === 'replace' && lines.length) {
         const allIds = lines.map(l => l.line_id);
-        await axios.delete(`${API}/estimations/lines`, { data: { line_ids: allIds } });
+        await deleteEstimationLines(allIds);
       }
       let wb;
       if (ext === 'csv') {
@@ -80,7 +369,7 @@ export default function EstimationDetail() {
       }
       const sheetName = wb.SheetNames[0];
       const ws = wb.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false });
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, raw: false });
 
       // Helpers: sanitize numbers, detect totals, normalize codes, and robust header mapping
       const parseNum = (val) => {
@@ -181,6 +470,7 @@ export default function EstimationDetail() {
         return true;
       });
       const totalRows = candidateRows.length || 1;
+      let lastItem = null;
       for (let ri = startIdx; ri < rows.length; ri++) {
         const row = rows[ri];
         if (!row || row.length === 0) continue;
@@ -197,25 +487,50 @@ export default function EstimationDetail() {
         const thicknessCell = colMap && colMap.thickness >= 0 ? row[colMap.thickness] : row[6];
         const quantityCell = colMap && colMap.quantity >= 0 ? row[colMap.quantity] : row[7];
 
-        // Find item by code or description
-        const item = findItemForRow(codeCell, descCell);
+        // Filter: Ignore rows where No., Length, Width, Thickness, and Quantity are all empty
+        const isCellEmpty = (c) => !c || String(c).trim() === '';
+        if (isCellEmpty(noUnitsCell) && isCellEmpty(lengthCell) && isCellEmpty(widthCell) && isCellEmpty(thicknessCell) && isCellEmpty(quantityCell)) {
+            skippedCount++; processedRows++; setImportProgress(Math.round((processedRows/totalRows)*100)); continue;
+        }
+
+        // Find item by code or description, or use lastItem if code/desc are empty
+        let item = null;
+        const hasIdentity = (String(codeCell || '').trim()) || (String(descCell || '').trim());
+        
+        if (hasIdentity) {
+            item = findItemForRow(codeCell, descCell);
+            lastItem = item; // Update lastItem (could be null if invalid code)
+        } else {
+            // Continuation row
+            item = lastItem;
+        }
+
         if (!item) { skippedCount++; missingItemCount++; processedRows++; setImportProgress(Math.round((processedRows/totalRows)*100)); continue; }
         // Skip if item has no valid rate (blank or non-positive)
         const hasRate = Number.isFinite(Number(item.rate)) && Number(item.rate) > 0;
         if (!hasRate) { skippedCount++; processedRows++; setImportProgress(Math.round((processedRows/totalRows)*100)); continue; }
 
+        const lengthRes = parseDimensionInput(lengthCell);
+        const widthRes = parseDimensionInput(widthCell);
+        const thicknessRes = parseDimensionInput(thicknessCell);
+        const noUnitsRes = parseDimensionInput(noUnitsCell);
+
         const payload = {
           item_id: item.item_id,
           sub_description: String(subDescCell || ''),
-          no_of_units: parseNum(noUnitsCell) ?? 1,
-          length: parseNum(lengthCell),
-          width: parseNum(widthCell),
-          thickness: parseNum(thicknessCell),
+          no_of_units: noUnitsRes.value ?? 1,
+          no_of_units_expr: noUnitsRes.expr,
+          length: lengthRes.value,
+          width: widthRes.value,
+          thickness: thicknessRes.value,
+          length_expr: lengthRes.expr,
+          width_expr: widthRes.expr,
+          thickness_expr: thicknessRes.expr,
           quantity: parseNum(quantityCell),
         };
 
         try {
-          await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
+          await createEstimationLine(estimationId, payload);
           importedCount++;
         } catch (e) {
           console.error('Failed to import row', e);
@@ -282,15 +597,26 @@ export default function EstimationDetail() {
     // Fetch all items initially to populate available regions and items list
     fetchItems();
     fetchLines();
+    fetchSpecialItemRequests();
+    fetchEstimationDetails();
   }, [estimationId]);
+
+  const fetchEstimationDetails = async () => {
+    try {
+      const data = await getEstimation(estimationId);
+      setEstimation(data);
+    } catch (err) {
+      console.error("Failed to fetch estimation details", err);
+    }
+  };
 
   const fetchItems = async (regionFilter) => {
     try {
       // If no regionFilter is provided, fetch ALL items irrespective of current estimation region.
       const fetchAll = typeof regionFilter === 'undefined';
       if (fetchAll) {
-        const res = await axios.get(`${API}/items`, { params: { limit: 1000000 } });
-        const all = res.data || [];
+        const res = await listItems({ limit: 1000000 });
+        const all = res || [];
         const seen = new Set();
         const dedup = all.filter((it) => {
           const key = it.item_id ?? `${it.item_code}:${it.region}`;
@@ -320,8 +646,8 @@ export default function EstimationDetail() {
       for (const r of regionsToFetch) {
         const params = { limit: 1000000 };
         if (r) params.region = r;
-        const res = await axios.get(`${API}/items`, { params });
-        all = all.concat(res.data || []);
+        const res = await listItems(params);
+        all = all.concat(res || []);
       }
 
       // Deduplicate items by item_id if present, otherwise by (item_code, region)
@@ -341,10 +667,35 @@ export default function EstimationDetail() {
   };
 
   const fetchLines = async () => {
-    const res = await axios.get(`${API}/estimations/${estimationId}/lines`);
-    setLines(res.data);
-    const tot = await axios.get(`${API}/estimations/${estimationId}/total`);
-    setTotal(tot.data.grand_total);
+    const data = await listEstimationLines(estimationId);
+    setLines(data);
+    const tot = await getEstimationTotal(estimationId);
+    setTotal(tot.grand_total);
+  };
+
+  const fetchSpecialItemRequests = async () => {
+    try {
+      setSpecialRequestsLoading(true);
+      setSpecialRequestsError("");
+      const data = await listSpecialItemRequests(estimationId);
+      setSpecialRequests(data || []);
+    } catch (e) {
+      const msg = e?.response?.data?.detail || "Failed to load special item requests";
+      setSpecialRequestsError(msg);
+    } finally {
+      setSpecialRequestsLoading(false);
+    }
+  };
+
+  const approveSpecialRequest = async (requestId) => {
+    await approveSpecialItemRequest(requestId);
+    fetchSpecialItemRequests();
+    fetchLines();
+  };
+
+  const rejectSpecialRequest = async (requestId) => {
+    await rejectSpecialItemRequest(requestId, "Rejected by admin");
+    fetchSpecialItemRequests();
   };
 
   const handleSelectLine = (lineId) => {
@@ -386,13 +737,43 @@ export default function EstimationDetail() {
 
   const handleDeleteSelected = async () => {
     try {
-      await axios.delete(`${API}/estimations/lines`, { data: { line_ids: selectedLineIds } });
+      await deleteEstimationLines(selectedLineIds);
       fetchLines();
       setSelectedLineIds([]);
       setIsDeleteLinesModalOpen(false);
     } catch (error) {
       console.error("Failed to delete lines", error);
       alert("Failed to delete lines.");
+    }
+  };
+
+  const handleDuplicateSelected = async () => {
+    if (selectedLineIds.length === 0) return;
+    try {
+      const linesToDuplicate = lines.filter(l => selectedLineIds.includes(l.line_id));
+      for (const line of linesToDuplicate) {
+        const payload = {
+          item_id: line.item_id,
+          sub_description: line.sub_description,
+          no_of_units: line.no_of_units,
+          no_of_units_expr: line.no_of_units_expr,
+          length: line.length,
+          width: line.width,
+          thickness: line.thickness,
+          length_expr: line.length_expr,
+          width_expr: line.width_expr,
+          thickness_expr: line.thickness_expr,
+          quantity: line.quantity,
+          attachment_name: line.attachment_name,
+          attachment_base64: line.attachment_base64,
+        };
+        await createEstimationLine(estimationId, payload);
+      }
+      fetchLines();
+      setSelectedLineIds([]);
+    } catch (error) {
+      console.error("Failed to duplicate lines", error);
+      alert("Failed to duplicate lines.");
     }
   };
 
@@ -412,7 +793,7 @@ export default function EstimationDetail() {
 
   const handleUpdateLine = async (updatedLineData) => {
     try {
-      await axios.put(`${API}/estimations/lines/${editingLine.line_id}`, updatedLineData);
+      await updateEstimationLine(editingLine.line_id, updatedLineData);
       setIsEditModalOpen(false);
       setEditingLine(null);
       fetchLines();
@@ -425,111 +806,216 @@ export default function EstimationDetail() {
 
   const downloadXlsx = () => {
     const wb = XLSX.utils.book_new();
-    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0);
+    // Calculate total including pending special items
+    const pendingSpecialAmount = specialRequests.filter(r => r.status !== 'approved').reduce((sum, r) => sum + ((r.quantity||0)*(r.rate||0)), 0);
+    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0) + pendingSpecialAmount;
 
     let aoa = [
-      ["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Calc Qty", "Rate", "Unit", "Amount"]
+      ["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Rate", "Unit", "Amount"]
     ];
     const merges = [];
-    let currentRow = 0; // This is the row index in the 'aoa' array
-
-    // Style for bold text
+    let currentRow = 0;
     const boldStyle = { font: { bold: true } };
-
     currentRow++; // For header row
 
-    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
-      // Add division name row
-      aoa.push([divisionName]);
-      merges.push({ s: { r: currentRow, c: 0 }, e: { r: currentRow, c: 11 } });
-      currentRow++;
+    const groupLines = (list) => {
+      return list.reduce((acc, line) => {
+        const divisionName = line.item?.division?.name || 'Uncategorized';
+        const orgName = (line.item?.organization || 'RHD');
+        const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+        if (!acc[label]) acc[label] = [];
+        acc[label].push(line);
+        return acc;
+      }, {});
+    };
 
-      // Add line items
-      divisionLines.forEach(l => {
-        aoa.push([
-          l.item?.item_code, l.item?.item_description, l.sub_description,
-          l.no_of_units, l.length, l.width, l.thickness, l.quantity,
-          l.calculated_qty, l.rate, l.item?.unit, l.amount
-        ]);
+    const standardLines = lines.filter(l => !l.item?.special_item);
+    
+    // Combine approved special lines with pending/rejected requests
+    const approvedSpecialLines = lines.filter(l => l.item?.special_item);
+    const pendingSpecialLines = specialRequests.filter(req => req.status !== 'approved').map(req => ({
+        line_id: `req-${req.request_id}`,
+        item: {
+            item_code: req.item_code || `SP-${String(req.division_id).padStart(2, '0')}/01/${String(req.request_id).padStart(3, '0')}`,
+            item_description: req.item_description,
+            division: req.division,
+            division_id: req.division_id,
+            organization: req.organization,
+            unit: req.unit,
+            special_item: true
+        },
+        sub_description: req.sub_description,
+        no_of_units: req.no_of_units,
+        length: req.length,
+        width: req.width,
+        thickness: req.thickness,
+        quantity: req.quantity,
+        calculated_qty: req.quantity,
+        rate: req.rate,
+        amount: (req.quantity || 0) * (req.rate || 0),
+        status: req.status
+    }));
+    
+    const specialLines = [...approvedSpecialLines, ...pendingSpecialLines];
+    
+    const standardGroups = groupLines(standardLines);
+    const specialGroups = groupLines(specialLines);
+
+    const addGroupsToAoa = (groups, sectionTitle) => {
+      if (Object.keys(groups).length === 0) return;
+      
+      // Section Header
+      if (sectionTitle) {
+        aoa.push([sectionTitle.toUpperCase()]);
+        merges.push({ s: { r: currentRow, c: 0 }, e: { r: currentRow, c: 10 } });
+        currentRow++;
+      }
+
+      Object.entries(groups).forEach(([divisionName, divisionLines]) => {
+        // Division name row
+        aoa.push([divisionName]);
+        merges.push({ s: { r: currentRow, c: 0 }, e: { r: currentRow, c: 10 } });
+        currentRow++;
+
+        // Add line items
+        divisionLines.forEach(l => {
+          aoa.push([
+            l.item?.item_code, l.item?.item_description, l.sub_description,
+            l.no_of_units, l.length, l.width, l.thickness, (l.calculated_qty ?? l.quantity),
+            l.rate, l.item?.unit, l.amount
+          ]);
+          currentRow++;
+        });
+
+        // Add subtotal row
+        const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+        aoa.push(["", "", "", "", "", "", "", "", "", "Subtotal", divisionSubtotal]);
+        currentRow++;
+
+        // Add blank row
+        aoa.push([]);
         currentRow++;
       });
+    };
 
-      // Add subtotal row
-      const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
-      aoa.push(["", "", "", "", "", "", "", "", "", "", "Subtotal", divisionSubtotal]);
-      currentRow++;
-
-      // Add blank row
-      aoa.push([]);
-      currentRow++;
-    });
+    addGroupsToAoa(standardGroups, "Item Master");
+    addGroupsToAoa(specialGroups, "Special Item");
 
     // Add grand total row
-    aoa.push(["", "", "", "", "", "", "", "", "", "", "Grand Total", grandTotal]);
+    aoa.push(["", "", "", "", "", "", "", "", "", "Grand Total", grandTotal]);
     
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!merges'] = merges;
 
     // Apply styles by iterating through the worksheet
     // Bold main headers
-    for (let C = 0; C <= 11; ++C) {
+    for (let C = 0; C <= 10; ++C) {
       const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C });
       if (ws[cellAddress]) ws[cellAddress].s = boldStyle;
     }
 
-    let styleRow = 1; // Start after main headers
-    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
-      // Bold and center division name
-      const divCellAddress = XLSX.utils.encode_cell({ r: styleRow, c: 0 });
-      if (ws[divCellAddress]) ws[divCellAddress].s = { ...boldStyle, alignment: { horizontal: "center" } };
-      styleRow++; // Move to first item row
-
-      styleRow += divisionLines.length; // Move to subtotal row
-
-      // Bold subtotal
-      const subtotalCellAddress = XLSX.utils.encode_cell({ r: styleRow, c: 11 });
-      if (ws[subtotalCellAddress]) ws[subtotalCellAddress].s = boldStyle;
-      styleRow += 2; // Move past subtotal and blank row to the next division header
+    // Apply styles to section headers, division headers, and subtotals
+    aoa.forEach((row, r) => {
+        if (!row || r === 0) return;
+        // Section or Division header (merged row with single string)
+        if (row.length === 1 && typeof row[0] === 'string') {
+             const addr = XLSX.utils.encode_cell({ r, c: 0 });
+             if (ws[addr]) ws[addr].s = { ...boldStyle, alignment: { horizontal: "center" } };
+        }
+        // Subtotal or Grand Total
+        if (row[9] === 'Subtotal' || row[9] === 'Grand Total') {
+             const addr = XLSX.utils.encode_cell({ r, c: 10 });
+             if (ws[addr]) ws[addr].s = boldStyle;
+        }
     });
-
-    // Bold grand total
-    const grandTotalCellAddress = XLSX.utils.encode_cell({ r: aoa.length - 1, c: 11 });
-    if (ws[grandTotalCellAddress]) ws[grandTotalCellAddress].s = boldStyle;
 
     XLSX.utils.book_append_sheet(wb, ws, "Estimation");
     XLSX.writeFile(wb, `estimation_${estimationId}.xlsx`);
   };
 
   const downloadCsv = () => {
-    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0);
+    // Calculate total including pending special items
+    const pendingSpecialAmount = specialRequests.filter(r => r.status !== 'approved').reduce((sum, r) => sum + ((r.quantity||0)*(r.rate||0)), 0);
+    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0) + pendingSpecialAmount;
 
     let aoa = [
-      ["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Calc Qty", "Rate", "Unit", "Amount"]
+      ["Item Code", "Description", "Sub Desc", "No.", "Length", "Width", "Thickness", "Quantity", "Rate", "Unit", "Amount"]
     ];
 
-    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
-      // Division heading
-      aoa.push([divisionName]);
+    const groupLines = (list) => {
+      return list.reduce((acc, line) => {
+        const divisionName = line.item?.division?.name || 'Uncategorized';
+        const orgName = (line.item?.organization || 'RHD');
+        const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+        if (!acc[label]) acc[label] = [];
+        acc[label].push(line);
+        return acc;
+      }, {});
+    };
 
-      // Line items
-      divisionLines.forEach(l => {
-        aoa.push([
-          l.item?.item_code, l.item?.item_description, l.sub_description,
-          l.no_of_units, l.length, l.width, l.thickness, l.quantity,
-          l.calculated_qty, l.rate, l.item?.unit, l.amount
-        ]);
+    const standardLines = lines.filter(l => !l.item?.special_item);
+    
+    // Combine approved special lines with pending/rejected requests
+    const approvedSpecialLines = lines.filter(l => l.item?.special_item);
+    const pendingSpecialLines = specialRequests.filter(req => req.status !== 'approved').map(req => ({
+        line_id: `req-${req.request_id}`,
+        item: {
+            item_code: req.item_code || `SP-${String(req.division_id).padStart(2, '0')}/01/${String(req.request_id).padStart(3, '0')}`,
+            item_description: req.item_description,
+            division: req.division,
+            division_id: req.division_id,
+            organization: req.organization,
+            unit: req.unit,
+            special_item: true
+        },
+        sub_description: req.sub_description,
+        no_of_units: req.no_of_units,
+        length: req.length,
+        width: req.width,
+        thickness: req.thickness,
+        quantity: req.quantity,
+        calculated_qty: req.quantity,
+        rate: req.rate,
+        amount: (req.quantity || 0) * (req.rate || 0),
+        status: req.status
+    }));
+    
+    const specialLines = [...approvedSpecialLines, ...pendingSpecialLines];
+    
+    const standardGroups = groupLines(standardLines);
+    const specialGroups = groupLines(specialLines);
+
+    const addGroupsToAoa = (groups, sectionTitle) => {
+      if (Object.keys(groups).length === 0) return;
+      if (sectionTitle) aoa.push([sectionTitle.toUpperCase()]);
+
+      Object.entries(groups).forEach(([divisionName, divisionLines]) => {
+        // Division heading
+        aoa.push([divisionName]);
+
+        // Line items
+        divisionLines.forEach(l => {
+          aoa.push([
+            l.item?.item_code, l.item?.item_description, l.sub_description,
+            l.no_of_units, l.length, l.width, l.thickness, (l.calculated_qty ?? l.quantity),
+            l.rate, l.item?.unit, l.amount
+          ]);
+        });
+
+        // Subtotal row
+        const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+        aoa.push(["", "", "", "", "", "", "", "", "", "Subtotal", divisionSubtotal]);
+
+        // Blank spacer
+        aoa.push([]);
       });
+    };
 
-      // Subtotal row
-      const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
-      aoa.push(["", "", "", "", "", "", "", "", "", "", "Subtotal", divisionSubtotal]);
-
-      // Blank spacer
-      aoa.push([]);
-    });
+    addGroupsToAoa(standardGroups, "Item Master");
+    addGroupsToAoa(specialGroups, "Special Item");
 
     // Grand total
-    aoa.push(["", "", "", "", "", "", "", "", "", "", "Grand Total", grandTotal]);
+    aoa.push(["", "", "", "", "", "", "", "", "", "Grand Total", grandTotal]);
 
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     const csv = XLSX.utils.sheet_to_csv(ws);
@@ -546,13 +1032,17 @@ export default function EstimationDetail() {
   const downloadPdf = () => {
     const title = localStorage.getItem(`estimationName:${estimationId}`) || `Estimation #${estimationId}`;
     const doc = new jsPDF('landscape', 'pt', 'a4');
-    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0);
-    const pageMargin = { top: 60, right: 20, bottom: 40, left: 20 };
+    
+    // Calculate total including pending special items
+    const pendingSpecialAmount = specialRequests.filter(r => r.status !== 'approved').reduce((sum, r) => sum + ((r.quantity||0)*(r.rate||0)), 0);
+    const grandTotal = lines.reduce((sum, line) => sum + (line.amount || 0), 0) + pendingSpecialAmount;
+    
+    const pageMargin = { top: 80, right: 20, bottom: 40, left: 20 };
 
     const drawHeaderFooter = () => {
       // Header
       doc.setFontSize(12);
-      doc.text(`${title} — ${region || 'No Region'}`, pageMargin.left, 30);
+      doc.text(`${title} — ${region || 'No Region'}`, pageMargin.left, 40);
       // Footer with page numbers
       const str = `Page ${doc.getNumberOfPages()}`;
       doc.setFontSize(10);
@@ -562,66 +1052,130 @@ export default function EstimationDetail() {
     const pageHeight = doc.internal.pageSize.getHeight();
     const usableBottom = pageHeight - pageMargin.bottom;
 
+    const groupLines = (list) => {
+      return list.reduce((acc, line) => {
+        const divisionName = line.item?.division?.name || 'Uncategorized';
+        const orgName = (line.item?.organization || 'RHD');
+        const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+        if (!acc[label]) acc[label] = [];
+        acc[label].push(line);
+        return acc;
+      }, {});
+    };
+
+    const standardLines = lines.filter(l => !l.item?.special_item);
+    
+    // Combine approved special lines with pending/rejected requests
+    const approvedSpecialLines = lines.filter(l => l.item?.special_item);
+    const pendingSpecialLines = specialRequests.filter(req => req.status !== 'approved').map(req => ({
+        line_id: `req-${req.request_id}`,
+        item: {
+            item_code: req.item_code || `SP-${String(req.division_id).padStart(2, '0')}/01/${String(req.request_id).padStart(3, '0')}`,
+            item_description: req.item_description,
+            division: req.division,
+            division_id: req.division_id,
+            organization: req.organization,
+            unit: req.unit,
+            special_item: true
+        },
+        sub_description: req.sub_description,
+        no_of_units: req.no_of_units,
+        length: req.length,
+        width: req.width,
+        thickness: req.thickness,
+        quantity: req.quantity,
+        calculated_qty: req.quantity,
+        rate: req.rate,
+        amount: (req.quantity || 0) * (req.rate || 0),
+        status: req.status
+    }));
+    
+    const specialLines = [...approvedSpecialLines, ...pendingSpecialLines];
+    
+    const standardGroups = groupLines(standardLines);
+    const specialGroups = groupLines(specialLines);
+
     // Flow divisions one after another; add a page only if needed
     let currentY = pageMargin.top;
-    Object.entries(groupedLines).forEach(([divisionName, divisionLines], idx) => {
-      // If not enough space for a heading, add a page
-      if (currentY > usableBottom - 30) {
-        doc.addPage();
-        drawHeaderFooter();
-        currentY = pageMargin.top;
+
+    const addGroupsToPdf = (groups, sectionTitle) => {
+      if (Object.keys(groups).length === 0) return;
+
+      // Section Title
+      if (sectionTitle) {
+        if (currentY > usableBottom - 50) {
+          doc.addPage();
+          drawHeaderFooter();
+          currentY = pageMargin.top;
+        }
+        doc.setFontSize(14);
+        doc.setFont(undefined, 'bold');
+        doc.text(sectionTitle.toUpperCase(), pageMargin.left, currentY + 10);
+        doc.setFont(undefined, 'normal');
+        currentY += 35;
       }
 
-      // Division heading
-      doc.setFontSize(11);
-      doc.text(`Division: ${divisionName}`, pageMargin.left, currentY - 12);
+      Object.entries(groups).forEach(([divisionName, divisionLines], idx) => {
+        // If not enough space for a heading and at least one row, add a page
+        if (currentY > usableBottom - 50) {
+          doc.addPage();
+          drawHeaderFooter();
+          currentY = pageMargin.top;
+        }
 
-      const body = divisionLines.map(l => [
-        l.item?.item_code || '',
-        l.item?.item_description || '',
-        l.sub_description || '',
-        l.no_of_units ?? '',
-        l.length ?? '',
-        l.width ?? '',
-        l.thickness ?? '',
-        l.quantity ?? '',
-        l.calculated_qty ?? '',
-        l.rate ?? '',
-        l.item?.unit || '',
-        l.amount ?? '',
-      ]);
-      const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+        // Division heading
+        doc.setFontSize(11);
+        doc.text(`Division: ${divisionName}`, pageMargin.left, currentY + 10);
+        currentY += 20;
 
-      autoTable(doc, {
-        startY: currentY,
-        margin: pageMargin,
-        head: [[
-          'Item Code','Description','Sub Desc','No.','Length','Width','Thickness','Quantity','Calc Qty','Rate','Unit','Amount'
-        ]],
-        body,
-        foot: [['Subtotal','','','','','','','','','','', divisionSubtotal.toFixed(2)]],
-        styles: { fontSize: 9, cellPadding: 3, overflow: 'linebreak' },
-        headStyles: { fillColor: [22,160,133], textColor: 255 },
-        columnStyles: {
-          0: { cellWidth: 55 },
-          1: { cellWidth: 140 },
-          2: { cellWidth: 110 },
-          3: { cellWidth: 35, halign: 'right' },
-          4: { cellWidth: 45, halign: 'right' },
-          5: { cellWidth: 45, halign: 'right' },
-          6: { cellWidth: 50, halign: 'right' },
-          7: { cellWidth: 55, halign: 'right' },
-          8: { cellWidth: 55, halign: 'right' },
-          9: { cellWidth: 50, halign: 'right' },
-          10: { cellWidth: 50, halign: 'center' },
-          11: { cellWidth: 70, halign: 'right' },
-        },
-        didDrawPage: () => drawHeaderFooter(),
+        const body = divisionLines.map(l => [
+          l.item?.item_code || '',
+          l.item?.item_description || '',
+          l.sub_description || '',
+          l.no_of_units ?? '',
+          l.length ?? '',
+          l.width ?? '',
+          l.thickness ?? '',
+          (l.calculated_qty ?? l.quantity) ?? '',
+          l.rate ?? '',
+          l.item?.unit || '',
+          l.amount ? l.amount.toFixed(2) : '',
+        ]);
+        const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+
+        autoTable(doc, {
+          startY: currentY,
+          margin: pageMargin,
+          head: [[
+            'Item Code','Description','Sub Desc','No.','Length','Width','Thickness','Quantity','Rate','Unit','Amount'
+          ]],
+          body,
+          foot: [['Subtotal','','','','','','','','','', divisionSubtotal.toFixed(2)]],
+          styles: { fontSize: 9, cellPadding: 3, overflow: 'linebreak' },
+          headStyles: { fillColor: [22,160,133], textColor: 255 },
+          columnStyles: {
+            0: { cellWidth: 55 },
+            1: { cellWidth: 140 },
+            2: { cellWidth: 110 },
+            3: { cellWidth: 35, halign: 'right' },
+            4: { cellWidth: 45, halign: 'right' },
+            5: { cellWidth: 45, halign: 'right' },
+            6: { cellWidth: 50, halign: 'right' },
+            7: { cellWidth: 55, halign: 'right' },
+            8: { cellWidth: 50, halign: 'right' },
+            9: { cellWidth: 50, halign: 'center' },
+            10: { cellWidth: 70, halign: 'right' },
+          },
+          didDrawPage: () => drawHeaderFooter(),
+        });
+
+        // Update currentY to position next table below the finished one
+        currentY = (doc.lastAutoTable?.finalY || pageMargin.top) + 30;
       });
+    };
 
-      // Update currentY to position next table below the finished one
-      currentY = (doc.lastAutoTable?.finalY || pageMargin.top) + 30;
-    });
+    addGroupsToPdf(standardGroups, "Item Master");
+    addGroupsToPdf(specialGroups, "Special Item");
 
     // Summary page
     doc.addPage();
@@ -632,11 +1186,23 @@ export default function EstimationDetail() {
     doc.text(`Grand Total: ${grandTotal.toFixed(2)}`, pageMargin.left, 140);
     // Division subtotals
     let y = 180;
-    Object.entries(groupedLines).forEach(([divisionName, divisionLines]) => {
-      const subtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
-      doc.text(`${divisionName}: ${subtotal.toFixed(2)}`, pageMargin.left, y);
-      y += 22;
-    });
+
+    const printSubtotals = (groups, title) => {
+      if (Object.keys(groups).length === 0) return;
+      doc.setFont(undefined, 'bold');
+      doc.text(title, pageMargin.left, y);
+      doc.setFont(undefined, 'normal');
+      y += 20;
+      Object.entries(groups).forEach(([divisionName, divisionLines]) => {
+        const subtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+        doc.text(`${divisionName}: ${subtotal.toFixed(2)}`, pageMargin.left + 10, y);
+        y += 22;
+      });
+      y += 10;
+    };
+
+    printSubtotals(standardGroups, "Item Master");
+    printSubtotals(specialGroups, "Special Item");
 
     doc.save(`estimation_${estimationId}.pdf`);
   };
@@ -660,16 +1226,108 @@ export default function EstimationDetail() {
     }
   };
 
-  const groupedLines = lines.reduce((acc, line) => {
-    const divisionName = line.item?.division?.name || 'Uncategorized';
-    const orgName = (line.item?.organization || 'RHD');
-    const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
-    if (!acc[label]) {
-      acc[label] = [];
+  const [activeTab, setActiveTab] = useState("standard"); // 'standard' | 'special' | 'summary'
+
+  const groupedLines = React.useMemo(() => {
+    // Filter lines based on active tab
+    const filteredLines = lines.filter(l => {
+      if (activeTab === 'summary') return true;
+      if (activeTab === 'standard') {
+        return !l.item?.special_item;
+      } else {
+        return !!l.item?.special_item;
+      }
+    });
+
+    const groups = filteredLines.reduce((acc, line) => {
+      const divisionName = line.item?.division?.name || 'Uncategorized';
+      const orgName = (line.item?.organization || 'RHD');
+      const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+      if (!acc[label]) {
+        acc[label] = [];
+      }
+      acc[label].push(line);
+      return acc;
+    }, {});
+
+    // For Special Item tab and Summary tab, also append pending/rejected requests
+    if (activeTab === 'special' || activeTab === 'summary') {
+        // Group requests by division
+        specialRequests.forEach(req => {
+            // We only show pending/rejected here. Approved ones become lines.
+            if (req.status === 'approved') return;
+            
+            const divisionName = req.division?.name || 'Uncategorized';
+            const orgName = (req.organization || 'RHD');
+            const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+            
+            if (!groups[label]) {
+                groups[label] = [];
+            }
+
+            // Calculate quantity if missing
+            const length = parseFloat(req.length) || 1;
+            const width = parseFloat(req.width) || 1;
+            const thickness = parseFloat(req.thickness) || 1;
+            const no_of_units = parseFloat(req.no_of_units) || 1;
+            
+            // If any dimension is present, we use the formula. If all are missing (only no_of_units), it's just no_of_units.
+            // But simplified: if value is 0 or null, treat as 1 for multiplication, UNLESS it's explicitly 0? 
+            // Usually dimensions are non-zero.
+            // Let's use the logic: Qty = No * L * W * T. 
+            // We need to check which fields are "active". 
+            // For now, simple multiplication of non-zero values is likely what's expected.
+            // However, to be precise: if a field is NULL/Empty, treat as 1.
+            
+            const calcQty = (req.quantity) ? parseFloat(req.quantity) : (no_of_units * length * width * thickness);
+            
+            // Map request to line-like structure
+            groups[label].push({
+                line_id: `req-${req.request_id}`,
+                is_request: true,
+                request_id: req.request_id,
+                status: req.status,
+                reason: req.reason,
+                item: {
+                    item_code: req.item_code || `SP-${String(req.division_id).padStart(2, '0')}/01/${String(req.request_id).padStart(3, '0')}`,
+                    item_description: req.item_description,
+                    division_id: req.division_id,
+                    division: req.division,
+                    unit: req.unit,
+                    special_item: true // treated as special
+                },
+                sub_description: req.sub_description,
+                no_of_units: req.no_of_units,
+                length: req.length,
+                width: req.width,
+                thickness: req.thickness,
+                length_expr: req.length_expr,
+                width_expr: req.width_expr,
+                thickness_expr: req.thickness_expr,
+                quantity: calcQty,
+                calculated_qty: calcQty, 
+                rate: req.rate,
+                amount: calcQty * (req.rate || 0),
+                attachment_name: req.attachment_name,
+                attachment_base64: req.attachment_base64,
+                requested_by: req.requested_by
+            });
+        });
     }
-    acc[label].push(line);
-    return acc;
-  }, {});
+    
+    return groups;
+  }, [lines, specialRequests, activeTab]);
+
+  // Calculate total based on current view
+  const currentViewTotal = React.useMemo(() => {
+    let sum = 0;
+    Object.values(groupedLines).forEach(group => {
+        group.forEach(line => {
+            sum += (line.amount || 0);
+        });
+    });
+    return sum;
+  }, [groupedLines]);
 
   // Refetch items when region changes and persist selection
   useEffect(() => {
@@ -715,14 +1373,23 @@ export default function EstimationDetail() {
               <span className="text-xs text-gray-900">{region || '—'}</span>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setIsImportModalOpen(true)} className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 text-xs font-medium py-1 px-3 rounded inline-flex items-center gap-1">
-                <FaUpload className="w-3 h-3" />
-                <span>Import</span>
-              </button>
-              <button onClick={() => setIsAddLineModalOpen(true)} className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1">
-                <FaPlus className="w-3 h-3" />
-                <span>Add Line</span>
-              </button>
+              {canEdit && (
+                <>
+                  <button onClick={() => setIsImportModalOpen(true)} className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 text-xs font-medium py-1 px-3 rounded inline-flex items-center gap-1">
+                    <FaUpload className="w-3 h-3" />
+                    <span>Import</span>
+                  </button>
+                  <button onClick={() => setIsEditingEnabled(!isEditingEnabled)} className={`border text-xs font-medium py-1 px-3 rounded inline-flex items-center gap-1 ${isEditingEnabled ? 'bg-orange-600 border-orange-600 text-white hover:bg-orange-700' : 'bg-white border-orange-600 text-orange-600 hover:bg-orange-50'}`}>
+                    {isEditingEnabled ? <FaCheck className="w-3 h-3" /> : <FaEdit className="w-3 h-3" />}
+                    <span>{isEditingEnabled ? 'Disable Editing' : 'Enable Editing'}</span>
+                  </button>
+                  {isEditingEnabled && <span className="text-orange-600 flex items-center" title="Direct Editing Enabled"><FaExclamationTriangle className="w-4 h-4" /></span>}
+                  <button onClick={() => setIsAddLineModalOpen(true)} className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1">
+                    <FaPlus className="w-3 h-3" />
+                    <span>Add Line</span>
+                  </button>
+                </>
+              )}
               <div className="relative" ref={downloadMenuRef}>
                 <button
                   onClick={() => setIsDownloadMenuOpen((v) => !v)}
@@ -788,13 +1455,29 @@ export default function EstimationDetail() {
                 {selectedLineIds.length === 1 ? (
                   <>
                     <button className="bg-gray-200 text-gray-900 text-xs px-3 py-1 rounded" onClick={openLineDetail}>Line Detail</button>
-                    <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={openEditModal}>Edit</button>
-                    <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={openDeleteLinesModal}>Delete</button>
+                    {canEdit && (
+                      <>
+                        <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={openEditModal}>Edit</button>
+                        <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded flex items-center gap-1" onClick={handleDuplicateSelected}>
+                          <FaCopy className="w-3 h-3" />
+                          <span>Duplicate</span>
+                        </button>
+                        <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={openDeleteLinesModal}>Delete</button>
+                      </>
+                    )}
                     <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={clearSelection}>Clear selection</button>
                   </>
                 ) : (
                   <>
-                    <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={openDeleteLinesModal}>Delete</button>
+                    {canEdit && (
+                      <>
+                        <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded flex items-center gap-1" onClick={handleDuplicateSelected}>
+                          <FaCopy className="w-3 h-3" />
+                          <span>Duplicate</span>
+                        </button>
+                        <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={openDeleteLinesModal}>Delete</button>
+                      </>
+                    )}
                     <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={clearSelection}>Clear selection</button>
                   </>
                 )}
@@ -805,10 +1488,41 @@ export default function EstimationDetail() {
           )}
         </div>
       </div>
+      {/* Tabs */}
+      <div className="flex border-b border-gray-200 mb-4">
+        <button
+          className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'standard' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('standard')}
+        >
+          Item Master
+        </button>
+        <button
+          className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'special' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('special')}
+        >
+          Special Item Master
+        </button>
+        <button
+          className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'summary' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
+          onClick={() => setActiveTab('summary')}
+        >
+          Summary
+        </button>
+      </div>
+
       {/* Scrollable table container */}
       <div className="overflow-auto max-h-[75vh] pr-2">
       {Object.entries(groupedLines).map(([divisionName, divisionLines]) => {
         const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+        
+        // Determine visible columns (show all if editing is enabled)
+        const hasSubDesc = isEditingEnabled || divisionLines.some(l => l.sub_description && String(l.sub_description).trim());
+        const hasLength = isEditingEnabled || divisionLines.some(l => (l.length != null && l.length !== "") || (l.length_expr && String(l.length_expr).trim()));
+        const hasWidth = isEditingEnabled || divisionLines.some(l => (l.width != null && l.width !== "") || (l.width_expr && String(l.width_expr).trim()));
+        const hasThickness = isEditingEnabled || divisionLines.some(l => (l.thickness != null && l.thickness !== "") || (l.thickness_expr && String(l.thickness_expr).trim()));
+        const hasQuantity = isEditingEnabled || divisionLines.some(l => (l.quantity != null && l.quantity !== "") || (l.calculated_qty != null && l.calculated_qty !== 0));
+        const hasAttachment = isEditingEnabled || divisionLines.some(l => l.attachment_name && String(l.attachment_name).trim());
+
         return (
           <div key={divisionName} className="mb-8">
             <h3 className="text-md font-semibold mb-2 bg-gray-200 p-2 rounded">{divisionName}</h3>
@@ -818,71 +1532,180 @@ export default function EstimationDetail() {
                   <table className="min-w-full border-collapse table-fixed">
                     <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
                       <tr>
-                        <th className="p-2 w-4">
-                          <input
-                            type="checkbox"
-                            onChange={(e) => {
-                              const allLineIdsInDivision = divisionLines.map(l => l.line_id);
-                              if (e.target.checked) {
-                                setSelectedLineIds(prev => [...new Set([...prev, ...allLineIdsInDivision])]);
-                              } else {
-                                setSelectedLineIds(prev => prev.filter(id => !allLineIdsInDivision.includes(id)));
-                              }
-                            }}
-                            checked={divisionLines.every(l => selectedLineIds.includes(l.line_id))}
+                        {canEdit && (
+                          <th className="p-2 w-4">
+                            <input
+                              type="checkbox"
+                              onChange={(e) => {
+                                const allLineIdsInDivision = divisionLines.map(l => l.line_id);
+                                if (e.target.checked) {
+                                  setSelectedLineIds(prev => [...new Set([...prev, ...allLineIdsInDivision])]);
+                                } else {
+                                  setSelectedLineIds(prev => prev.filter(id => !allLineIdsInDivision.includes(id)));
+                                }
+                              }}
+                              checked={divisionLines.every(l => selectedLineIds.includes(l.line_id))}
+                            />
+                          </th>
+                        )}
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 relative group select-none" style={{ width: columnWidths.item_code, minWidth: columnWidths.item_code }}>
+                          Item Code
+                          <div
+                            className="absolute right-0 top-0 h-full w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-10"
+                            onMouseDown={(e) => startResizing(e, 'item_code')}
                           />
                         </th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Item Code</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Description</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Sub Desc</th>
+                        <th className="px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 relative group select-none" style={{ width: columnWidths.description, minWidth: columnWidths.description }}>
+                          Description
+                          <div
+                            className="absolute right-0 top-0 h-full w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-10"
+                            onMouseDown={(e) => startResizing(e, 'description')}
+                          />
+                        </th>
+                        {hasSubDesc && (
+                          <th className="px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 relative group select-none" style={{ width: columnWidths.sub_description, minWidth: columnWidths.sub_description }}>
+                            Sub Desc
+                            <div
+                              className="absolute right-0 top-0 h-full w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-10"
+                              onMouseDown={(e) => startResizing(e, 'sub_description')}
+                            />
+                          </th>
+                        )}
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">No.</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Length</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Width</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Thickness</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Quantity</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Calc Qty</th>
+                        {hasLength && <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Length</th>}
+                        {hasWidth && <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Width</th>}
+                        {hasThickness && <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Thickness</th>}
+                        {hasQuantity && <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Quantity</th>}
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Rate</th>
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Unit</th>
-                        <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Attachment</th>
+                        {hasAttachment && <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Attachment</th>}
+                        {activeTab === 'special' && <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[100px] text-gray-800 border-gray-200">Status</th>}
                         <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Amount</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200 bg-white">
                       {divisionLines.map((l, i) => (
                         <tr key={l.line_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors ${selectedLineIds.includes(l.line_id) ? 'bg-teal-100' : ''}`}>
-                          <td className="p-2">
-                            <input
-                              type="checkbox"
-                              checked={selectedLineIds.includes(l.line_id)}
-                              onChange={() => handleSelectLine(l.line_id)}
-                            />
+                          {canEdit && (
+                            <td className="p-2">
+                              {!l.is_request && (
+                                <input
+                                  type="checkbox"
+                                  checked={selectedLineIds.includes(l.line_id)}
+                                  onChange={() => handleSelectLine(l.line_id)}
+                                />
+                              )}
+                            </td>
+                          )}
+                          {/* Item Code */}
+                          <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'item_code')}>
+                             {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'item_code' ? (
+                                <select
+                                    autoFocus
+                                    value={inlineValue}
+                                    onChange={(e) => setInlineValue(e.target.value)}
+                                    onBlur={() => setInlineEditingCell(null)}
+                                    onKeyDown={handleInlineKeyDown}
+                                    className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    {(uniqueItemsByDivision[l.item?.division_id]?.byCode || []).map(it => <option key={it.item_id} value={it.item_id}>{it.item_code}</option>)}
+                                </select>
+                             ) : l.item?.item_code}
                           </td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.item_code}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.item_description}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.sub_description}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.no_of_units}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.length}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.width}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.thickness}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.quantity}</td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.calculated_qty}</td>
+                          {/* Description */}
+                          <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'description')}>
+                             {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'description' ? (
+                                <select
+                                    autoFocus
+                                    value={inlineValue}
+                                    onChange={(e) => setInlineValue(e.target.value)}
+                                    onBlur={() => setInlineEditingCell(null)}
+                                    onKeyDown={handleInlineKeyDown}
+                                    className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    {(uniqueItemsByDivision[l.item?.division_id]?.byDesc || []).map(it => <option key={it.item_id} value={it.item_id}>{it.item_description}</option>)}
+                                </select>
+                             ) : l.item?.item_description}
+                          </td>
+                          {/* Sub Desc */}
+                          {hasSubDesc && (
+                            <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'sub_description')}>
+                               {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'sub_description' ? (
+                                  <input autoFocus value={inlineValue} onChange={e=>setInlineValue(e.target.value)} onBlur={() => setInlineEditingCell(null)} onKeyDown={handleInlineKeyDown} className="w-full text-xs border border-teal-500 rounded px-1 py-0.5" />
+                               ) : l.sub_description}
+                            </td>
+                          )}
+                          {/* No. */}
+                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'no_of_units')}>
+                             {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'no_of_units' ? (
+                                <input autoFocus value={inlineValue} onChange={e=>setInlineValue(e.target.value)} onBlur={() => setInlineEditingCell(null)} onKeyDown={handleInlineKeyDown} className="w-full text-xs border border-teal-500 rounded px-1 py-0.5" />
+                             ) : renderDimensionCell(l, "no_of_units")}
+                          </td>
+                          {/* Length */}
+                          {hasLength && (
+                            <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'length')}>
+                               {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'length' ? (
+                                  <input autoFocus value={inlineValue} onChange={e=>setInlineValue(e.target.value)} onBlur={() => setInlineEditingCell(null)} onKeyDown={handleInlineKeyDown} className="w-full text-xs border border-teal-500 rounded px-1 py-0.5" />
+                               ) : renderDimensionCell(l, "length")}
+                            </td>
+                          )}
+                          {/* Width */}
+                          {hasWidth && (
+                            <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'width')}>
+                               {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'width' ? (
+                                  <input autoFocus value={inlineValue} onChange={e=>setInlineValue(e.target.value)} onBlur={() => setInlineEditingCell(null)} onKeyDown={handleInlineKeyDown} className="w-full text-xs border border-teal-500 rounded px-1 py-0.5" />
+                               ) : renderDimensionCell(l, "width")}
+                            </td>
+                          )}
+                          {/* Thickness */}
+                          {hasThickness && (
+                            <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200" onDoubleClick={() => !l.is_request && handleCellDoubleClick(l, 'thickness')}>
+                               {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'thickness' ? (
+                                  <input autoFocus value={inlineValue} onChange={e=>setInlineValue(e.target.value)} onBlur={() => setInlineEditingCell(null)} onKeyDown={handleInlineKeyDown} className="w-full text-xs border border-teal-500 rounded px-1 py-0.5" />
+                               ) : renderDimensionCell(l, "thickness")}
+                            </td>
+                          )}
+                          {/* Quantity (Merged) */}
+                          {hasQuantity && (
+                            <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200"
+                                onDoubleClick={() => !l.is_request && !hasDimensions(l) && handleCellDoubleClick(l, 'quantity')}
+                                style={{ cursor: !l.is_request && !hasDimensions(l) ? 'pointer' : 'default', backgroundColor: !l.is_request && !hasDimensions(l) ? 'transparent' : '#f9fafb' }}
+                            >
+                               {inlineEditingCell?.lineId === l.line_id && inlineEditingCell?.field === 'quantity' ? (
+                                  <input autoFocus type="number" value={inlineValue} onChange={e=>setInlineValue(e.target.value)} onBlur={() => setInlineEditingCell(null)} onKeyDown={handleInlineKeyDown} className="w-full text-xs border border-teal-500 rounded px-1 py-0.5" />
+                               ) : (l.calculated_qty ?? l.quantity)}
+                            </td>
+                          )}
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.rate}</td>
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.item?.unit}</td>
+                          {hasAttachment && (
+                            <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">
+                                {l.attachment_name ? (
+                                <span className="inline-flex items-center gap-2">
+                                    <span className="font-medium">{l.attachment_name}</span>
+                                    <button
+                                    type="button"
+                                    onClick={() => downloadAttachment(l)}
+                                    className="px-2 py-1 rounded text-white bg-gradient-to-r from-rose-500 to-pink-600 hover:from-rose-600 hover:to-pink-700"
+                                    >
+                                    Download
+                                    </button>
+                                </span>
+                                ) : '—'}
+                            </td>
+                          )}
+                          {activeTab === 'special' && (
+                            <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">
+                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${l.status==='rejected'?'bg-red-100 text-red-700': l.status==='approved' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                                 {l.status ? l.status.toUpperCase() : 'PENDING'}
+                               </span>
+                            </td>
+                          )}
                           <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">
-                            {l.attachment_name ? (
-                              <span className="inline-flex items-center gap-2">
-                                <span className="font-medium">{l.attachment_name}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => downloadAttachment(l)}
-                                  className="px-2 py-1 rounded text-white bg-gradient-to-r from-rose-500 to-pink-600 hover:from-rose-600 hover:to-pink-700"
-                                >
-                                  Download
-                                </button>
-                              </span>
-                            ) : '—'}
+                            {formatAmount(l.amount)}
                           </td>
-                          <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{l.amount}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -902,8 +1725,8 @@ export default function EstimationDetail() {
 
       <div className="flex justify-end mt-4">
         <div className="inline-flex items-center gap-3 bg-gradient-to-r from-teal-50 to-emerald-50 text-teal-900 border border-teal-200 rounded-lg px-4 py-2 shadow-sm">
-          <span className="text-sm font-semibold">Grand Total</span>
-          <span className="text-xl font-bold">{formatAmount(total)}</span>
+          <span className="text-sm font-semibold">Grand Total {activeTab === 'summary' ? '(All Items)' : activeTab === 'special' ? '(Special Items)' : '(Standard Items)'}</span>
+          <span className="text-xl font-bold">{formatAmount(currentViewTotal)}</span>
         </div>
       </div>
 
@@ -913,6 +1736,7 @@ export default function EstimationDetail() {
           lines={lines}
           onClose={() => setIsAddLineModalOpen(false)}
           onSave={fetchLines}
+          onRequestSubmitted={fetchSpecialItemRequests}
           estimationId={estimationId}
           region={region}
         />
@@ -953,7 +1777,7 @@ export default function EstimationDetail() {
 
       {isImportModalOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50" role="dialog" aria-modal="true">
-          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto z-50 relative border border-gray-200">
             <button
               type="button"
               onClick={() => setIsImportModalOpen(false)}
@@ -1077,7 +1901,8 @@ export default function EstimationDetail() {
 
 // NOTE: Import modal temporarily rendered inline above to bypass a parser error.
 
-function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
+function AddLineModal({ items, lines, onClose, onSave, onRequestSubmitted, estimationId, region }) {
+  const [activeTab, setActiveTab] = useState("standard"); // 'standard' | 'special'
   const [form, setForm] = useState({ item_id: "", sub_description: "", no_of_units: 1, length: "", width: "", thickness: "", quantity: "" });
   const [keepOpen, setKeepOpen] = useState(true);
   const [presets, setPresets] = useState([]);
@@ -1085,6 +1910,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
   const [presetName, setPresetName] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
+  const [submitNotice, setSubmitNotice] = useState("");
 
   // Organization selection state
   const [organizations, setOrganizations] = useState([]);
@@ -1180,47 +2006,89 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
   const [newItemUnit, setNewItemUnit] = useState("");
 
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+  const parseDimension = (label, raw, allowed) => {
+    if (!allowed) return { value: null, expr: null, error: null };
+    const result = parseDimensionInput(raw);
+    if (result.error) return { ...result, error: `${label} equation is invalid.` };
+    return result;
+  };
 
   const addLine = async (e) => {
     e.preventDefault();
-    const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name || "";
-
     let finalItemId = form.item_id;
+    const unitForCheck = activeTab === 'special' ? newItemUnit : selectedUnit;
+    const allowed = allowedInputsForUnit(unitForCheck, unitMode);
+    const noUnitsResult = parseDimension("No. of units", form.no_of_units, allowed.includes("no_of_units"));
+    const lengthResult = parseDimension("Length", form.length, allowed.includes("length"));
+    const widthResult = parseDimension("Width", form.width, allowed.includes("width"));
+    const thicknessResult = parseDimension("Thickness", form.thickness, allowed.includes("thickness"));
+    const dimensionError = noUnitsResult.error || lengthResult.error || widthResult.error || thicknessResult.error;
+    if (dimensionError) {
+      setSubmitError(dimensionError);
+      return;
+    }
 
-    if (selectedDivisionName === 'Special Item') {
-        if (!newItemName) {
-            setSubmitError('Item Description is required for Special Item.');
-            return;
-        }
-        if (!attachmentBase64) {
-            setSubmitError('Attachment is required for Special Item.');
-            return;
-        }
-        
-        try {
-            setIsSubmitting(true);
-            const newItemPayload = {
-               division_id: parseInt(selectedDivisionId),
-               item_code: `SP-${Date.now()}`,
-               item_description: newItemName,
-               unit: newItemUnit,
-               rate: parseFloat(newItemRate) || 0,
-               region: selectedRegion || region || "Default",
-               organization: selectedOrganizationName || "RHD"
-            };
-            const createdItem = await createItem(newItemPayload);
-            finalItemId = createdItem.item_id;
-        } catch (err) {
-            setIsSubmitting(false);
-            setSubmitError('Failed to create special item: ' + (err?.response?.data?.detail || err.message));
-            return;
-        }
+    if (activeTab === 'special') {
+      if (!selectedDivisionId) {
+        setSubmitError('Division is required for Special Item.');
+        return;
+      }
+      if (!newItemName) {
+        setSubmitError('Item Description is required for Special Item.');
+        return;
+      }
+      if (!attachmentBase64) {
+        setSubmitError('Attachment is required for Special Item.');
+        return;
+      }
+      try {
+        setIsSubmitting(true);
+        setSubmitError("");
+        setSubmitNotice("");
+        await createSpecialItemRequest(estimationId, {
+          division_id: parseInt(selectedDivisionId),
+          item_description: newItemName,
+          unit: newItemUnit || null,
+          rate: newItemRate ? parseFloat(newItemRate) : null,
+          region: selectedRegion || region || "Default",
+          organization: selectedOrganizationName || "RHD",
+          attachment_name: attachmentName || null,
+          attachment_base64: attachmentBase64,
+          sub_description: form.sub_description || null,
+          no_of_units: noUnitsResult.value ?? 1,
+          no_of_units_expr: noUnitsResult.expr,
+          length: lengthResult.value,
+          width: widthResult.value,
+          thickness: thicknessResult.value,
+          length_expr: lengthResult.expr,
+          width_expr: widthResult.expr,
+          thickness_expr: thicknessResult.expr,
+          quantity: form.quantity ? parseFloat(form.quantity) : null,
+        });
+        setNewItemName("");
+        setNewItemRate("");
+        setNewItemUnit("");
+        setAttachmentName("");
+        setAttachmentBase64("");
+        setSelectedFileName("");
+        setSubmitNotice("Special item submitted for approval.");
+        onRequestSubmitted?.();
+        onSave();
+      } catch (err) {
+        setSubmitError('Failed to submit special item: ' + (err?.response?.data?.detail || err.message));
+      } finally {
+        setIsSubmitting(false);
+      }
+      if (keepOpen) {
+        setForm((f) => ({ ...f }));
+      } else {
+        onClose();
+      }
+      return;
     } else {
         if (!form.item_id) return;
     }
 
-    const unitForCheck = selectedDivisionName === 'Special Item' ? newItemUnit : selectedUnit;
-    const allowed = allowedInputsForUnit(unitForCheck, unitMode);
     const sanitize = (key, val) => (allowed.includes(key) ? val : null);
 
     const existingNames = (lines || []).map(l => l.attachment_name).filter(Boolean);
@@ -1231,7 +2099,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
       return formatName(n);
     };
     let finalAttachmentName = (attachmentName || '').trim();
-    if (selectedDivisionName === 'Special Item') {
+    if (activeTab === 'special') {
       if (!finalAttachmentName) {
         finalAttachmentName = nextUniqueName();
       } else if (existingNames.includes(finalAttachmentName)) {
@@ -1250,29 +2118,24 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
     const payload = {
       item_id: parseInt(finalItemId),
       sub_description: form.sub_description || null,
-      no_of_units: sanitize('no_of_units', parseInt(form.no_of_units || 1)),
-      length: sanitize('length', form.length ? parseFloat(form.length) : null),
-      width: sanitize('width', form.width ? parseFloat(form.width) : null),
-      thickness: sanitize('thickness', form.thickness ? parseFloat(form.thickness) : null),
+      no_of_units: noUnitsResult.value ?? 1,
+      no_of_units_expr: noUnitsResult.expr,
+      length: lengthResult.value,
+      width: widthResult.value,
+      thickness: thicknessResult.value,
+      length_expr: lengthResult.expr,
+      width_expr: widthResult.expr,
+      thickness_expr: thicknessResult.expr,
       quantity: sanitize('quantity', form.quantity ? parseFloat(form.quantity) : null),
-      attachment_name: selectedDivisionName === 'Special Item' && attachmentBase64 ? finalAttachmentName : null,
-      attachment_base64: selectedDivisionName === 'Special Item' && attachmentBase64 ? attachmentBase64 : null,
+      attachment_name: activeTab === 'special' && attachmentBase64 ? finalAttachmentName : null,
+      attachment_base64: activeTab === 'special' && attachmentBase64 ? attachmentBase64 : null,
     };
 
     try {
-      if (selectedDivisionName !== 'Special Item') setIsSubmitting(true);
+      setIsSubmitting(true);
       setSubmitError("");
-      await axios.post(`${API}/estimations/${estimationId}/lines`, payload);
-      
-      if (selectedDivisionName === 'Special Item') {
-          setNewItemName("");
-          setNewItemRate("");
-          setNewItemUnit("");
-          setAttachmentName("");
-          setAttachmentBase64("");
-          setSelectedFileName("");
-      }
-
+      setSubmitNotice("");
+      await createEstimationLine(estimationId, payload);
       onSave();
     } catch (err) {
       const msg = err?.response?.data?.detail || 'Failed to add line. Please check inputs.';
@@ -1334,6 +2197,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
         const fromCache = (items || [])
           .filter(it => String(it.division_id) === String(selectedDivisionId))
           .filter(it => normalizeOrg(it.organization) === normalizeOrg(selectedOrganizationName))
+          .filter(it => !it.special_item) // Filter out special items
           .filter(it => {
             if (!targetRegion) return true;
             return canonRegion(it.region) === canonRegion(targetRegion);
@@ -1348,7 +2212,9 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
         if (targetRegion) params.region = targetRegion;
         if (selectedOrganizationName) params.organization = selectedOrganizationName;
         const fetched = await listItems(params);
-        const scoped = (fetched || []).filter(it => String(it.division_id) === String(selectedDivisionId));
+        const scoped = (fetched || [])
+          .filter(it => String(it.division_id) === String(selectedDivisionId))
+          .filter(it => !it.special_item); // Filter out special items
         setModalItems(scoped);
       } catch (e) {
         console.error('Failed to load items for selection', e);
@@ -1357,12 +2223,12 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
         setItemsLoading(false);
       }
     };
-    if (selectedDivisionId && selectedOrganizationName) {
+    if (selectedDivisionId && selectedOrganizationName && activeTab === 'standard') {
       syncItems();
     } else {
       setModalItems([]);
     }
-  }, [items, selectedDivisionId, selectedOrganizationName, selectedRegion, region]);
+  }, [items, selectedDivisionId, selectedOrganizationName, selectedRegion, region, activeTab]);
 
   const applyLastForItem = () => {
     try {
@@ -1436,17 +2302,35 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
     }
   };
 
-  const isSpecialItem = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item';
-  const unitForInputs = isSpecialItem ? newItemUnit : selectedUnit;
+  const unitForInputs = activeTab === 'special' ? newItemUnit : selectedUnit;
   const allowedInputs = allowedInputsForUnit(unitForInputs, unitMode);
 
   return (
     <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
-      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
+      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto z-50 relative border border-gray-200">
         <button onClick={onClose} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
         </button>
-        <h3 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Add New Line</h3>
+        <h3 className="text-lg sm:text-xl font-semibold mb-4 text-gray-900">Add New Line</h3>
+        
+        {/* Tabs */}
+        <div className="flex border-b border-gray-200 mb-4">
+          <button
+            type="button"
+            className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'standard' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
+            onClick={() => setActiveTab('standard')}
+          >
+            Add Item
+          </button>
+          <button
+            type="button"
+            className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'special' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
+            onClick={() => setActiveTab('special')}
+          >
+            Add Special Item
+          </button>
+        </div>
+
         {(selectedRegion || region) && (
           <p className="mb-3 text-xs text-gray-600">Showing items for region: <span className="font-medium">{selectedRegion || region}</span></p>
         )}
@@ -1488,65 +2372,59 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
             ))}
           </select>
           {/* Item filtered by division */}
-          {(() => {
-             const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name;
-             if (selectedDivisionName === 'Special Item') {
-                 return (
-                     <div className="grid grid-cols-1 gap-2">
-                        <input
-                            type="text"
-                            value={newItemName}
-                            onChange={(e) => setNewItemName(e.target.value)}
-                            placeholder="Item Name / Description"
-                            className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
-                        />
-                         <div className="grid grid-cols-2 gap-2">
-                            <input
-                                type="number"
-                                value={newItemRate}
-                                onChange={(e) => setNewItemRate(e.target.value)}
-                                placeholder="Rate"
-                                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
-                            />
-                             <input
-                                type="text"
-                                value={newItemUnit}
-                                onChange={(e) => setNewItemUnit(e.target.value)}
-                                placeholder="Unit (e.g. LS, m2)"
-                                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
-                            />
-                        </div>
-                    </div>
-                 );
-             }
-             return (
-              <select
-                name="item_id"
-                value={form.item_id}
-                onChange={(e)=>{
-                  const id = e.target.value;
-                  setForm({ ...form, item_id: id });
-                  const it = modalItems.find(x => String(x.item_id) === String(id));
-                  const unit = it?.unit || "";
-                  setSelectedUnit(unit);
-                  setUnitMode(supportsDualMode(unit) ? 'default' : 'default');
-                }}
-                disabled={!selectedDivisionId || !selectedOrganizationName}
-                className={`border ${(!selectedDivisionId || !selectedOrganizationName) ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
-              >
-                <option value="">Select Item</option>
-                {modalItems
-                  .map(it => (
-                    <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>
-                  ))}
-              </select>
-             );
-          })()}
+          {activeTab === 'special' ? (
+             <div className="grid grid-cols-1 gap-2">
+                <input
+                    type="text"
+                    value={newItemName}
+                    onChange={(e) => setNewItemName(e.target.value)}
+                    placeholder="Item Name / Description"
+                    className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                />
+                 <div className="grid grid-cols-2 gap-2">
+                    <input
+                        type="number"
+                        value={newItemRate}
+                        onChange={(e) => setNewItemRate(e.target.value)}
+                        placeholder="Rate"
+                        className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                    />
+                     <input
+                        type="text"
+                        value={newItemUnit}
+                        onChange={(e) => setNewItemUnit(e.target.value)}
+                        placeholder="Unit (e.g. LS, m2)"
+                        className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+                    />
+                </div>
+            </div>
+          ) : (
+            <select
+              name="item_id"
+              value={form.item_id}
+              onChange={(e)=>{
+                const id = e.target.value;
+                setForm({ ...form, item_id: id });
+                const it = modalItems.find(x => String(x.item_id) === String(id));
+                const unit = it?.unit || "";
+                setSelectedUnit(unit);
+                setUnitMode(supportsDualMode(unit) ? 'default' : 'default');
+              }}
+              disabled={!selectedDivisionId || !selectedOrganizationName}
+              className={`border ${(!selectedDivisionId || !selectedOrganizationName) ? 'opacity-60 cursor-not-allowed' : ''} border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs`}
+            >
+              <option value="">Select Item</option>
+              {modalItems
+                .map(it => (
+                  <option key={it.item_id} value={it.item_id}>{it.item_code} — {it.item_description}</option>
+                ))}
+            </select>
+          )}
           {/* Unit + mode */}
-          {(form.item_id || (divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item')) && (
+          {(form.item_id || activeTab === 'special') && (
             <div className="flex items-center justify-between gap-2 text-xs">
               <div className="text-gray-800"><span className="font-semibold text-sm">Unit:</span> <span className="font-bold text-sm">
-                  {divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item' ? (newItemUnit || '—') : (selectedUnit || '—')}
+                  {activeTab === 'special' ? (newItemUnit || '—') : (selectedUnit || '—')}
               </span></div>
               {supportsDualMode(selectedUnit) && (
                 <div className="flex items-center gap-2">
@@ -1559,7 +2437,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
               )}
             </div>
           )}
-          {form.item_id && (
+          {activeTab === 'standard' && form.item_id && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 items-end">
               <div className="flex items-center gap-2">
                 <button type="button" onClick={applyLastForItem} className="text-xs px-3 py-2 rounded bg-gray-100 hover:bg-gray-200 border">Use last for item</button>
@@ -1596,57 +2474,54 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
             <input name="thickness" value={form.thickness} onChange={handleChange} placeholder="Thickness/Depth" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
           )}
           {/* Attachment inputs for Special Item division */}
-          {(() => {
-            const selectedDivisionName = divisions.find(d => String(d.id) === String(selectedDivisionId))?.name;
-            if (selectedDivisionName === 'Special Item') {
-              return (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
-                  <input
-                    type="text"
-                    value={attachmentName}
-                    onChange={(e)=>setAttachmentName(e.target.value)}
-                    placeholder="Attachment Name (e.g., A-01)"
-                    className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
-                  />
-                  <div className="flex items-center gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="*/*"
-                      onChange={(e)=>{
-                        const file = e.target.files?.[0];
-                        if (!file) { setAttachmentBase64(''); setSelectedFileName(''); return; }
-                        setSelectedFileName(file.name);
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          const result = reader.result;
-                          if (typeof result === 'string') {
-                            const b64 = result.includes(',') ? result.split(',')[1] : result;
-                            setAttachmentBase64(b64);
-                          }
-                        };
-                        reader.readAsDataURL(file);
-                      }}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current && fileInputRef.current.click()}
-                      className="text-xs px-3 py-2 rounded bg-gradient-to-r from-rose-500 to-pink-600 text-white hover:from-rose-600 hover:to-pink-700"
-                    >
-                      Upload Attachment
-                    </button>
-                    <span className="text-[11px] text-gray-600 truncate max-w-[160px]" title={selectedFileName}>
-                      {selectedFileName || 'No file selected'}
-                    </span>
-                  </div>
-                </div>
-              );
-            }
-            return null;
-          })()}
+          {activeTab === 'special' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+              <input
+                type="text"
+                value={attachmentName}
+                onChange={(e)=>setAttachmentName(e.target.value)}
+                placeholder="Attachment Name (e.g., A-01)"
+                className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs"
+              />
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="*/*"
+                  onChange={(e)=>{
+                    const file = e.target.files?.[0];
+                    if (!file) { setAttachmentBase64(''); setSelectedFileName(''); return; }
+                    setSelectedFileName(file.name);
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      const result = reader.result;
+                      if (typeof result === 'string') {
+                        const b64 = result.includes(',') ? result.split(',')[1] : result;
+                        setAttachmentBase64(b64);
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  className="text-xs px-3 py-2 rounded bg-gradient-to-r from-rose-500 to-pink-600 text-white hover:from-rose-600 hover:to-pink-700"
+                >
+                  Upload Attachment
+                </button>
+                <span className="text-[11px] text-gray-600 truncate max-w-[160px]" title={selectedFileName}>
+                  {selectedFileName || 'No file selected'}
+                </span>
+              </div>
+            </div>
+          )}
           {submitError && (
             <div className="text-xs text-red-600">{submitError}</div>
+          )}
+          {submitNotice && (
+            <div className="text-xs text-emerald-700">{submitNotice}</div>
           )}
           <div className="mt-2 flex justify-between items-center gap-3">
             <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -1665,7 +2540,7 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
               disabled={isSubmitting}
               className={`${isSubmitting ? 'opacity-70 cursor-not-allowed' : ''} bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs`}
             >
-              {isSubmitting ? 'Adding…' : (divisions.find(d => String(d.id) === String(selectedDivisionId))?.name === 'Special Item' ? 'Submit Item' : 'Add Line')}
+              {isSubmitting ? 'Adding…' : (activeTab === 'special' ? 'Submit Item' : 'Add Line')}
             </button>
           </div>
         </form>
@@ -1677,24 +2552,39 @@ function AddLineModal({ items, lines, onClose, onSave, estimationId, region }) {
 function EditLineModal({ line, onClose, onSave }) {
   const [editForm, setEditForm] = useState({
     sub_description: line.sub_description || "",
-    no_of_units: line.no_of_units || 1,
-    length: line.length || "",
-    width: line.width || "",
-    thickness: line.thickness || "",
+    no_of_units: getInitialDimensionValue(line.no_of_units_expr, line.no_of_units),
+    length: getInitialDimensionValue(line.length_expr, line.length),
+    width: getInitialDimensionValue(line.width_expr, line.width),
+    thickness: getInitialDimensionValue(line.thickness_expr, line.thickness),
     quantity: line.quantity || "",
   });
+  const [submitError, setSubmitError] = useState("");
 
   const handleChange = (e) => setEditForm({ ...editForm, [e.target.name]: e.target.value });
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    const noUnitsResult = parseDimensionInput(editForm.no_of_units);
+    const lengthResult = parseDimensionInput(editForm.length);
+    const widthResult = parseDimensionInput(editForm.width);
+    const thicknessResult = parseDimensionInput(editForm.thickness);
+    const dimensionError = noUnitsResult.error || lengthResult.error || widthResult.error || thicknessResult.error;
+    if (dimensionError) {
+      setSubmitError(dimensionError);
+      return;
+    }
+    setSubmitError("");
     const payload = {
       item_id: line.item_id, // item_id is not editable
       sub_description: editForm.sub_description || null,
-      no_of_units: parseInt(editForm.no_of_units || 1),
-      length: editForm.length ? parseFloat(editForm.length) : null,
-      width: editForm.width ? parseFloat(editForm.width) : null,
-      thickness: editForm.thickness ? parseFloat(editForm.thickness) : null,
+      no_of_units: noUnitsResult.value ?? 1,
+      no_of_units_expr: noUnitsResult.expr,
+      length: lengthResult.value,
+      width: widthResult.value,
+      thickness: thicknessResult.value,
+      length_expr: lengthResult.expr,
+      width_expr: widthResult.expr,
+      thickness_expr: thicknessResult.expr,
       quantity: editForm.quantity ? parseFloat(editForm.quantity) : null,
     };
     onSave(payload);
@@ -1720,13 +2610,14 @@ function EditLineModal({ line, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
-      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
+      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto z-50 relative border border-gray-200">
         <button onClick={onClose} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
         </button>
         <h3 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Edit Line</h3>
         <p className="mb-2 text-xs text-gray-600">Item: {line.item.item_code} — {line.item.item_description}</p>
         <p className="mb-3 text-xs text-gray-600">Rate: {line.rate} (fixed)</p>
+        {submitError && <div className="mb-2 text-xs text-red-600">{submitError}</div>}
         <form id="edit-line-form" onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 mt-2">
           <input name="sub_description" value={editForm.sub_description} onChange={handleChange} placeholder="Sub description" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
           <input name="no_of_units" value={editForm.no_of_units} onChange={handleChange} placeholder="No. of units" className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs" />
@@ -1811,7 +2702,7 @@ function ConfirmDeleteLinesModal({ selectedIds, lines, onClose, onConfirm }) {
 function LineDetailModal({ line, onClose }) {
   return (
     <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
-      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl z-50 relative border border-gray-200">
+      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto z-50 relative border border-gray-200">
         <button onClick={onClose} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
         </button>

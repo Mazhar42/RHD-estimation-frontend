@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-import { API_BASE as API } from "../api/base";
 import { Link, useNavigate } from "react-router-dom";
 import { FaTrashAlt, FaPlus, FaEdit } from "react-icons/fa";
-
-// Use centralized API base resolver
+import { listProjects, createProject, deleteProject } from "../api/projects";
+import { useAuth } from "../hooks/useAuth";
 
 export default function Projects() {
   const navigate = useNavigate();
+  const { user, hasRole } = useAuth();
+  const isAdmin = hasRole("admin") || hasRole("superadmin");
   const [projects, setProjects] = useState([]);
   const [form, setForm] = useState({ project_name: "", client_name: "" });
   const [isAddProjectModalOpen, setIsAddProjectModalOpen] = useState(false);
@@ -20,11 +20,28 @@ export default function Projects() {
   const [editProjectForm, setEditProjectForm] = useState({ project_name: "", client_name: "" });
   const [editProjectError, setEditProjectError] = useState("");
 
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+  };
+
+  const formatUser = (user, userId) => {
+    const label = user?.full_name || user?.username;
+    if (label) return label;
+    if (userId) return `User #${userId}`;
+    return "—";
+  };
+
   useEffect(() => { fetchProjects(); }, []);
 
   const fetchProjects = async () => {
-    const res = await axios.get(`${API}/projects`);
-    setProjects(res.data);
+    try {
+      const data = await listProjects();
+      setProjects(data);
+    } catch (err) {
+      console.error("Failed to fetch projects", err);
+    }
   };
 
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
@@ -36,7 +53,7 @@ export default function Projects() {
       return;
     }
     try {
-      await axios.post(`${API}/projects`, form);
+      await createProject(form);
       setForm({ project_name: "", client_name: "" });
       setIsAddProjectModalOpen(false);
       fetchProjects();
@@ -53,10 +70,14 @@ export default function Projects() {
 
   const performDeleteProject = async () => {
     if (!projectPendingDelete) return;
-    await axios.delete(`${API}/projects/${projectPendingDelete.project_id}`);
-    setIsConfirmDeleteProjectOpen(false);
-    setProjectPendingDelete(null);
-    fetchProjects();
+    try {
+      await deleteProject(projectPendingDelete.project_id);
+      setIsConfirmDeleteProjectOpen(false);
+      setProjectPendingDelete(null);
+      fetchProjects();
+    } catch (err) {
+      console.error("Failed to delete project", err);
+    }
   };
 
   // Close modal on Escape
@@ -287,28 +308,32 @@ export default function Projects() {
                       </Link>
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{p.client_name || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatUser(p.created_by, p.created_by_id)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(p.created_at)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatUser(p.updated_by, p.updated_by_id)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(p.updated_at)}</td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap text-right">
                       <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
-                          onClick={() => openEditProject(p)}
-                          title="Edit Project"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
-                          onClick={() => requestDeleteProject(p)}
-                          title="Delete Project"
-                        >
-                          Delete
-                        </button>
+                        {(isAdmin || p.created_by_id === user?.user_id) && (
+                          <>
+                            <button
+                              type="button"
+                              className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
+                              onClick={() => openEditProject(p)}
+                              title="Edit Project"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
+                              onClick={() => requestDeleteProject(p)}
+                              title="Delete Project"
+                            >
+                              Delete
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

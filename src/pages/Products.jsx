@@ -1,12 +1,15 @@
 import React, { useEffect, useState, useRef } from "react";
-import axios from "axios";
+import { apiClient } from "../api/axios";
 import { listOrganizations, listRegions, createRegion, deleteRegion, createOrganization, deleteOrganization, updateOrganization, updateRegion } from "../api/orgs";
-import { API_BASE as API } from "../api/base";
+import { importItems } from "../api/items";
 import { FaEdit, FaTrash, FaPlus, FaUpload } from "react-icons/fa";
+import { useAuth } from "../hooks/useAuth";
 
 // Use robust API base to avoid '/undefined' in production
 
 export default function Products() {
+  const { hasRole } = useAuth();
+  const isAdmin = hasRole("admin") || hasRole("superadmin");
   const [isAddDivisionModalOpen, setIsAddDivisionModalOpen] = useState(false);
   const [isAddItemModalOpen, setIsAddItemModalOpen] = useState(false);
   const [divisions, setDivisions] = useState([]);
@@ -27,6 +30,10 @@ export default function Products() {
   const [editingOrgName, setEditingOrgName] = useState("");
   const [confirmDeleteOrgId, setConfirmDeleteOrgId] = useState(null);
   const [items, setItems] = useState([]);
+  const [specialItems, setSpecialItems] = useState([]);
+  const [specialItemsLoading, setSpecialItemsLoading] = useState(false);
+  const [specialItemsError, setSpecialItemsError] = useState("");
+  const [activeTab, setActiveTab] = useState("items");
   const [divisionName, setDivisionName] = useState("");
   const makeInitialRegionRates = React.useCallback((regions) => Object.fromEntries((regions || []).map(r => [r, ""])), []);
   const [form, setForm] = useState({ item_code: "", item_description: "", unit: "", division_id: "", organization: "", regionRates: {} });
@@ -114,8 +121,10 @@ export default function Products() {
           setOrgRegionObjs(regs);
           setForm(f => ({ ...f, organization: defaultOrg.name, regionRates: makeInitialRegionRates(regs.map(r => r.name)) }));
           await fetchItems(defaultOrg.name);
+          await fetchSpecialItems(defaultOrg.name);
         } else {
           await fetchItems();
+          await fetchSpecialItems();
         }
       } catch (e) {
         console.error("Failed to load organizations/regions", e);
@@ -136,6 +145,7 @@ export default function Products() {
       setOrgRegionObjs(regs);
       setForm(f => ({ ...f, organization: org.name, regionRates: makeInitialRegionRates(regs.map(r => r.name)) }));
       await fetchItems(org.name);
+      await fetchSpecialItems(org.name);
     } catch (e) {
       console.error("Failed to load regions", e);
     }
@@ -316,15 +326,30 @@ export default function Products() {
   // Export menu removed
 
   const fetchDivisions = async () => {
-    const res = await axios.get(`${API}/items/divisions`);
+    const res = await apiClient.get(`/items/divisions`);
     setDivisions(res.data);
   };
   const fetchItems = async (organizationName) => {
     // Request a larger limit so the UI reflects full imports; include organization filter if provided
     const params = { limit: 1000000 };
     if (organizationName) params.organization = organizationName;
-    const res = await axios.get(`${API}/items`, { params });
+    const res = await apiClient.get(`/items`, { params });
     setItems(res.data);
+  };
+  const fetchSpecialItems = async (organizationName) => {
+    try {
+      setSpecialItemsLoading(true);
+      setSpecialItemsError("");
+      const params = { limit: 1000000 };
+      if (organizationName) params.organization = organizationName;
+      const res = await apiClient.get(`/items/special`, { params });
+      setSpecialItems(res.data || []);
+    } catch (e) {
+      const msg = e?.response?.data?.detail || "Failed to load special items";
+      setSpecialItemsError(msg);
+    } finally {
+      setSpecialItemsLoading(false);
+    }
   };
 
   const addDivision = async () => {
@@ -333,7 +358,7 @@ export default function Products() {
       return;
     }
     const payload = { name: divisionName.trim(), organization_id: selectedOrg?.org_id };
-    await axios.post(`${API}/items/divisions`, payload);
+    await apiClient.post(`/items/divisions`, payload);
     setDivisionName("");
     setAddDivisionError("");
     fetchDivisions();
@@ -375,7 +400,7 @@ export default function Products() {
       .filter((region) => String(form.regionRates[region] || '').trim() !== '')
       .map((region) => ({ ...base, rate: parseFloat(form.regionRates[region]), region }));
     try {
-      await Promise.all(payloads.map(p => axios.post(`${API}/items`, p)));
+      await Promise.all(payloads.map(p => apiClient.post(`/items`, p)));
     } catch (err) {
       setAddItemError("Failed to add one or more region rates");
       return;
@@ -395,7 +420,7 @@ export default function Products() {
 
   const deleteDivisionById = async () => {
     if (!confirmDeleteDivisionId) return;
-    await axios.delete(`${API}/items/divisions/${confirmDeleteDivisionId}`);
+    await apiClient.delete(`/items/divisions/${confirmDeleteDivisionId}`);
     if (String(form.division_id) === String(confirmDeleteDivisionId)) {
       setForm({ ...form, division_id: "" });
     }
@@ -452,7 +477,7 @@ export default function Products() {
     if (!confirmDeleteItemId) return;
     try {
       setIsDeletingItem(true);
-      await axios.delete(`${API}/items/${confirmDeleteItemId}`);
+      await apiClient.delete(`/items/${confirmDeleteItemId}`);
       setIsConfirmDeleteItemOpen(false);
       setConfirmDeleteItemId(null);
       fetchItems();
@@ -474,14 +499,14 @@ export default function Products() {
   const updateItem = async () => {
     if (!editItem) return;
     const payload = { ...editItem, rate: editItem.rate ? parseFloat(editItem.rate) : null, division_id: parseInt(editItem.division_id) };
-    await axios.put(`${API}/items/${editItem.item_id}`, payload);
+    await apiClient.put(`/items/${editItem.item_id}`, payload);
     setEditItem(null);
     setIsEditModalOpen(false);
     fetchItems(selectedOrg?.name);
   };
 
   const deleteItem = async (item_id) => {
-    await axios.delete(`${API}/items/${item_id}`);
+    await apiClient.delete(`/items/${item_id}`);
     fetchItems(selectedOrg?.name);
   };
 
@@ -517,17 +542,13 @@ export default function Products() {
     try {
       setIsImporting(true);
       setImportBanner({ type: 'info', message: 'Importing item master… Please wait.' });
-      const formData = new FormData();
-      formData.append('file', importFile);
-      const res = await axios.post(`${API}/items/import?mode=${importMode}`, formData, {
-        onUploadProgress: (evt) => {
-          if (!evt.total) return;
-          const pct = Math.round((evt.loaded / evt.total) * 100);
-          setUploadProgress(pct);
-        }
+      const res = await importItems(importFile, importMode, (evt) => {
+        if (!evt.total) return;
+        const pct = Math.round((evt.loaded / evt.total) * 100);
+        setUploadProgress(pct);
       });
-      const processed = res?.data?.processed ?? null;
-      const skipped = res?.data?.skipped ?? 0;
+      const processed = res?.processed ?? null;
+      const skipped = res?.skipped ?? 0;
       await fetchItems(selectedOrg?.name);
       setImportBanner({ type: skipped > 0 ? 'warning' : 'success', message: processed != null ? `Imported ${processed} item(s) successfully${skipped ? `, skipped ${skipped} (no rate).` : '.'}` : 'Import completed successfully.' });
       setImportFile(null);
@@ -670,7 +691,7 @@ export default function Products() {
     }
     try {
       setIsMassDeleting(true);
-      const results = await Promise.allSettled(ids.map(id => axios.delete(`${API}/items/${id}`)));
+      const results = await Promise.allSettled(ids.map(id => apiClient.delete(`/items/${id}`)));
       const succeeded = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.length - succeeded;
       await fetchItems();
@@ -708,7 +729,7 @@ export default function Products() {
       const batchSize = 20; // delete in batches for visible progress
       for (let i = 0; i < ids.length; i += batchSize) {
         const batch = ids.slice(i, i + batchSize);
-        const results = await Promise.allSettled(batch.map(id => axios.delete(`${API}/items/${id}`)));
+        const results = await Promise.allSettled(batch.map(id => apiClient.delete(`/items/${id}`)));
         const succeededInBatch = results.filter(r => r.status === 'fulfilled').length;
         const failedInBatch = results.length - succeededInBatch;
         completed += succeededInBatch;
@@ -807,7 +828,7 @@ export default function Products() {
     const ids = selectedItemIds.filter(Boolean);
     if (ids.length === 0) return;
     try {
-      const results = await Promise.allSettled(ids.map(id => axios.delete(`${API}/items/${id}`)));
+      const results = await Promise.allSettled(ids.map(id => apiClient.delete(`/items/${id}`)));
       const succeeded = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.length - succeeded;
       await fetchItems();
@@ -833,6 +854,27 @@ export default function Products() {
     const { division_id, item_code } = parseGroupKey(key);
     return items.filter(it => String(it.division_id) === String(division_id) && String(it.item_code) === String(item_code));
   };
+  const handleDuplicateSelectedGroup = () => {
+    if (!selectedGroupKey) return;
+    const groupItems = getItemsForGroup(selectedGroupKey);
+    if (groupItems.length === 0) return;
+    const any = groupItems[0];
+    const rates = Object.fromEntries(orgRegions.map(r => [r, '']));
+    for (const it of groupItems) {
+      const r = it.region;
+      rates[r] = it.rate ?? '';
+    }
+    setForm({
+      division_id: any.division_id,
+      item_code: any.item_code,
+      item_description: any.item_description,
+      unit: any.unit,
+      organization: any.organization || 'RHD',
+      regionRates: rates,
+    });
+    setIsAddItemModalOpen(true);
+  };
+
   const beginEditSelectedGroup = () => {
     if (!selectedGroupKey) return;
     const groupItems = getItemsForGroup(selectedGroupKey);
@@ -870,9 +912,9 @@ export default function Products() {
         const normalized = region;
         const existing = groupItems.find(it => it.region === normalized);
         if (existing) {
-          ops.push(axios.put(`${API}/items/${existing.item_id}`, { ...base, rate: val !== '' && val != null ? parseFloat(val) : null, region: existing.region }));
+          ops.push(apiClient.put(`/items/${existing.item_id}`, { ...base, rate: val !== '' && val != null ? parseFloat(val) : null, region: existing.region }));
         } else if (String(val).trim() !== '') {
-          ops.push(axios.post(`${API}/items`, { ...base, rate: parseFloat(val), region: normalized }));
+          ops.push(apiClient.post(`/items`, { ...base, rate: parseFloat(val), region: normalized }));
         }
       }
       await Promise.all(ops);
@@ -898,7 +940,7 @@ export default function Products() {
     const groupItems = getItemsForGroup(selectedGroupKey);
     if (groupItems.length === 0) { setIsConfirmDeleteGroupOpen(false); return; }
     try {
-      const results = await Promise.allSettled(groupItems.map(it => axios.delete(`${API}/items/${it.item_id}`)));
+      const results = await Promise.allSettled(groupItems.map(it => apiClient.delete(`/items/${it.item_id}`)));
       const succeeded = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.length - succeeded;
       await fetchItems();
@@ -969,73 +1011,148 @@ export default function Products() {
           {toast}
         </div>
       )}
-      <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-semibold">Item Master</h2>
-        <div className="flex gap-2 items-center">
-          <div className="flex items-center gap-2 mr-2">
-            <label className="text-xs text-emerald-700 font-semibold">Organization:</label>
-            <select
-              className="border border-gray-300 h-6 px-3 rounded text-xs"
-              value={selectedOrg?.org_id || ""}
-              onChange={(e) => changeOrganization(e.target.value)}
-            >
-              <option value="">Select</option>
-              {organizations.map(o => (
-                <option key={o.org_id} value={o.org_id}>{o.name}</option>
-              ))}
-            </select>
-          </div>
-          <button onClick={() => setIsAddDivisionModalOpen(true)} className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight h-6 px-4 rounded inline-flex items-center gap-1">
-            <FaPlus className="w-3 h-3" />
-            <span>Add Division</span>
-          </button>
-          <button onClick={() => setIsAddItemModalOpen(true)} className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-extralight h-6 px-4 rounded inline-flex items-center gap-1">
-            <FaPlus className="w-3 h-3" />
-            <span>Add Item</span>
+      <div className="mb-6">
+        <div className="flex items-center gap-6 border-b border-gray-200">
+          <button
+            type="button"
+            onClick={() => setActiveTab("special")}
+            className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px ${
+              activeTab === "special"
+                ? "border-[var(--color-primary-600)] text-[var(--color-primary-700)]"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Special Item Master
           </button>
           <button
-            onClick={() => setIsManageRegionsOpen(true)}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsManageRegionsOpen(true); } }}
-            className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 text-xs font-medium h-6 px-3 rounded inline-flex items-center gap-1"
-            aria-haspopup="dialog"
+            type="button"
+            onClick={() => setActiveTab("items")}
+            className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px ${
+              activeTab === "items"
+                ? "border-[var(--color-primary-600)] text-[var(--color-primary-700)]"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
           >
-            <FaPlus className="w-3 h-3" />
-            <span>Manage Regions</span>
-          </button>
-          <button
-            onClick={() => setIsManageOrganizationsOpen(true)}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsManageOrganizationsOpen(true); } }}
-            className="bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-medium h-6 px-3 rounded inline-flex items-center gap-1"
-            aria-haspopup="dialog"
-          >
-            <FaPlus className="w-3 h-3" />
-            <span>Manage Orgs</span>
-          </button>
-          {/* Export option removed permanently */}
-          <button
-            onClick={() => setIsImportModalOpen(true)}
-            className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-medium h-6 px-4 rounded shadow-sm inline-flex items-center gap-1"
-          >
-            <FaUpload className="w-3 h-3" />
-            <span>Import Item</span>
-          </button>
-          <button
-            onClick={() => setIsMassDeleteModalOpen(true)}
-            className="bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-medium h-6 px-4 rounded shadow-sm inline-flex items-center gap-1"
-          >
-            Mass Delete
+            Item Master
           </button>
         </div>
       </div>
 
-      {importBanner && (
+      {activeTab === "special" && (
+        <div className="mb-6 bg-white border border-gray-200 rounded-lg p-4">
+          {specialItemsLoading && <div className="text-sm text-gray-600">Loading special items...</div>}
+          {specialItemsError && <div className="text-sm text-red-600">{specialItemsError}</div>}
+          {!specialItemsLoading && !specialItemsError && (
+            <div className="overflow-x-auto border border-gray-200 rounded-lg">
+              <table className="min-w-full text-sm">
+                <thead className="bg-gray-50 border-b">
+                  <tr>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Division</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Code</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Description</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Unit</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Region</th>
+                    <th className="text-right px-3 py-2 text-xs font-semibold text-gray-700">Rate</th>
+                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Organization</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {specialItems.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
+                        No special items found
+                      </td>
+                    </tr>
+                  )}
+                  {specialItems.map((it) => (
+                    <tr key={it.special_item_id} className="hover:bg-teal-50">
+                      <td className="px-3 py-2 text-gray-800">{it.division?.name || "—"}</td>
+                      <td className="px-3 py-2 text-gray-800">{it.item_code}</td>
+                      <td className="px-3 py-2 text-gray-800">{it.item_description}</td>
+                      <td className="px-3 py-2 text-gray-800">{it.unit || "—"}</td>
+                      <td className="px-3 py-2 text-gray-800">{it.region}</td>
+                      <td className="px-3 py-2 text-gray-800 text-right">{it.rate != null ? formatRate(it.rate) : ""}</td>
+                      <td className="px-3 py-2 text-gray-800">{it.organization || "RHD"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "items" && (
+        <>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Item Master</h2>
+            <div className="flex gap-2 items-center">
+              <div className="flex items-center gap-2 mr-2">
+                <label className="text-xs text-emerald-700 font-semibold">Organization:</label>
+                <select
+                  className="border border-gray-300 h-6 px-3 rounded text-xs"
+                  value={selectedOrg?.org_id || ""}
+                  onChange={(e) => changeOrganization(e.target.value)}
+                >
+                  <option value="">Select</option>
+                  {organizations.map(o => (
+                    <option key={o.org_id} value={o.org_id}>{o.name}</option>
+                  ))}
+                </select>
+              </div>
+              {isAdmin && (
+                <>
+                  <button onClick={() => setIsAddDivisionModalOpen(true)} className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight h-6 px-4 rounded inline-flex items-center gap-1">
+                    <FaPlus className="w-3 h-3" />
+                    <span>Add Division</span>
+                  </button>
+                  <button onClick={() => setIsAddItemModalOpen(true)} className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-extralight h-6 px-4 rounded inline-flex items-center gap-1">
+                    <FaPlus className="w-3 h-3" />
+                    <span>Add Item</span>
+                  </button>
+                  <button
+                    onClick={() => setIsManageRegionsOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsManageRegionsOpen(true); } }}
+                    className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 text-xs font-medium h-6 px-3 rounded inline-flex items-center gap-1"
+                    aria-haspopup="dialog"
+                  >
+                    <FaPlus className="w-3 h-3" />
+                    <span>Manage Regions</span>
+                  </button>
+                  <button
+                    onClick={() => setIsManageOrganizationsOpen(true)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsManageOrganizationsOpen(true); } }}
+                    className="bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-medium h-6 px-3 rounded inline-flex items-center gap-1"
+                    aria-haspopup="dialog"
+                  >
+                    <FaPlus className="w-3 h-3" />
+                    <span>Manage Orgs</span>
+                  </button>
+                  <button
+                    onClick={() => setIsImportModalOpen(true)}
+                    className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-medium h-6 px-4 rounded shadow-sm inline-flex items-center gap-1"
+                  >
+                    <FaUpload className="w-3 h-3" />
+                    <span>Import Item</span>
+                  </button>
+                  <button
+                    onClick={() => setIsMassDeleteModalOpen(true)}
+                    className="bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-medium h-6 px-4 rounded shadow-sm inline-flex items-center gap-1"
+                  >
+                    Mass Delete
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        {importBanner && (
         <div className={`mt-3 p-3 rounded-md border text-sm ${importBanner.type === 'error' ? 'bg-red-50 text-red-700 border-red-300' : importBanner.type === 'warning' ? 'bg-orange-50 text-orange-700 border-orange-300' : importBanner.type === 'info' ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-emerald-50 text-emerald-700 border-emerald-300'}`}>
           <div className="flex justify-between items-start">
             <span>{importBanner.message}</span>
             <button className="text-xs opacity-70 hover:opacity-100" onClick={() => setImportBanner(null)}>Dismiss</button>
           </div>
         </div>
-      )}
+        )}
 
       {isAddDivisionModalOpen && (
         <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
@@ -1747,7 +1864,7 @@ export default function Products() {
             <table className="min-w-full border-collapse table-fixed">
               <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
                 <tr>
-                  <th className="px-2 py-1 text-center text-xs font-bold border-r min-w-[40px] text-gray-800 border-gray-200">Sel</th>
+                  {isAdmin && <th className="px-2 py-1 text-center text-xs font-bold border-r min-w-[40px] text-gray-800 border-gray-200">Sel</th>}
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Division</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Code</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r w-[30%] text-gray-800 border-gray-200">Description</th>
@@ -1758,7 +1875,7 @@ export default function Products() {
                   ))}
                 </tr>
                 <tr>
-                  <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>
+                  {isAdmin && <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>}
                   <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
                     <input type="text" placeholder="Search..." value={search.division} onChange={(e) => setSearch({ ...search, division: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
                   </th>
@@ -1796,13 +1913,15 @@ export default function Products() {
                   currentItems
                     .map((row, i) => (
                       <tr key={`${row.item_code}|${row.division_id ?? row.division?.name ?? i}`} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
-                        <td className="px-2 py-1 text-center border-r border-gray-200">
-                          <input
-                            type="checkbox"
-                            checked={selectedGroupKey === `${row.division_id}|${row.item_code}`}
-                            onChange={() => setSelectedGroupKey(prev => prev === `${row.division_id}|${row.item_code}` ? null : `${row.division_id}|${row.item_code}`)}
-                          />
-                        </td>
+                        {isAdmin && (
+                          <td className="px-2 py-1 text-center border-r border-gray-200">
+                            <input
+                              type="checkbox"
+                              checked={selectedGroupKey === `${row.division_id}|${row.item_code}`}
+                              onChange={() => setSelectedGroupKey(prev => prev === `${row.division_id}|${row.item_code}` ? null : `${row.division_id}|${row.item_code}`)}
+                            />
+                          </td>
+                        )}
                         <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.division?.name ?? "—"}</td>
                         <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.item_code}</td>
                         <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200 max-w-[28rem]" title={row.item_description}>{row.item_description}</td>
@@ -1821,6 +1940,7 @@ export default function Products() {
                 <div className="text-xs">1 grouped item selected</div>
                 <div className="flex items-center gap-2">
                   <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={() => beginEditSelectedGroup()}>Edit</button>
+                  <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded" onClick={() => handleDuplicateSelectedGroup()}>Duplicate</button>
                   <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={() => requestDeleteSelectedGroup()}>Delete</button>
                   <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={clearSelection}>Clear selection</button>
                 </div>
@@ -2107,6 +2227,8 @@ export default function Products() {
             </div>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

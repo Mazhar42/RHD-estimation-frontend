@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-import { API_BASE as API } from "../api/base";
 import { listOrganizations, listRegions } from "../api/orgs";
+import { listItems } from "../api/items";
+import { listProjects, listEstimations, createEstimation } from "../api/projects";
+import { deleteEstimation, updateEstimation } from "../api/estimations";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { FaTrash, FaPlus, FaEdit } from "react-icons/fa";
-
-// Use centralized API base resolver
+import { useAuth } from "../hooks/useAuth";
 
 export default function ProjectEstimations() {
   const navigate = useNavigate();
+  const { user, hasRole } = useAuth();
+  const isAdmin = hasRole("admin") || hasRole("superadmin");
   const { projectId } = useParams();
   const [estimations, setEstimations] = useState([]);
   const [name, setName] = useState("");
@@ -25,6 +27,19 @@ export default function ProjectEstimations() {
   const [editRegion, setEditRegion] = useState("");
   const [editError, setEditError] = useState("");
 
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+  };
+
+  const formatUser = (user, userId) => {
+    const label = user?.full_name || user?.username;
+    if (label) return label;
+    if (userId) return `User #${userId}`;
+    return "—";
+  };
+
   useEffect(() => {
     fetchEstimations();
     fetchRegions();
@@ -32,8 +47,12 @@ export default function ProjectEstimations() {
   }, [projectId]);
 
   const fetchEstimations = async () => {
-    const res = await axios.get(`${API}/projects/${projectId}/estimations`);
-    setEstimations(res.data);
+    try {
+      const data = await listEstimations(projectId);
+      setEstimations(data);
+    } catch (err) {
+      console.error("Failed to fetch estimations", err);
+    }
   };
 
   const fetchRegions = async () => {
@@ -48,8 +67,8 @@ export default function ProjectEstimations() {
         return;
       }
       // Fallback: derive regions from items but restrict to organization=RHD
-      const res = await axios.get(`${API}/items`, { params: { limit: 1000000, organization: 'RHD' } });
-      const unique = Array.from(new Set((res.data || []).map(it => it.region))).filter(Boolean).sort();
+      const items = await listItems({ limit: 1000000, organization: 'RHD' });
+      const unique = Array.from(new Set((items || []).map(it => it.region))).filter(Boolean).sort();
       setRegions(unique);
     } catch (e) {
       console.error('Failed to load regions', e);
@@ -58,8 +77,8 @@ export default function ProjectEstimations() {
 
   const fetchProjectName = async () => {
     try {
-      const res = await axios.get(`${API}/projects`);
-      const proj = (res.data || []).find(p => String(p.project_id) === String(projectId));
+      const data = await listProjects();
+      const proj = (data || []).find(p => String(p.project_id) === String(projectId));
       if (proj) setProjectName(proj.project_name || "");
     } catch (e) {
       console.error('Failed to load project name', e);
@@ -75,16 +94,19 @@ export default function ProjectEstimations() {
     }
     const defaultName = `Estimation #${(estimations?.length || 0) + 1}`;
     const estimationNameToSend = (name && name.trim()) ? name.trim() : defaultName;
-    const res = await axios.post(`${API}/projects/${projectId}/estimations`, { estimation_name: estimationNameToSend });
-    const created = res.data;
     try {
-      localStorage.setItem(`estimationRegion:${created.estimation_id}`, selectedRegion);
-      localStorage.setItem(`estimationName:${created.estimation_id}`, estimationNameToSend);
-    } catch {}
-    setName("");
-    setCreateError("");
-    setIsCreateEstimationModalOpen(false);
-    fetchEstimations();
+      const created = await createEstimation(projectId, { estimation_name: estimationNameToSend });
+      try {
+        localStorage.setItem(`estimationRegion:${created.estimation_id}`, selectedRegion);
+        localStorage.setItem(`estimationName:${created.estimation_id}`, estimationNameToSend);
+      } catch {}
+      setName("");
+      setCreateError("");
+      setIsCreateEstimationModalOpen(false);
+      fetchEstimations();
+    } catch (err) {
+      setCreateError(err?.response?.data?.detail || "Failed to create estimation");
+    }
   };
 
   // Key handling for Create Estimation modal: Esc closes, Enter submits
@@ -117,7 +139,7 @@ export default function ProjectEstimations() {
         if (estimationToDelete) {
           (async () => {
             try {
-              await axios.delete(`${API}/estimations/${estimationToDelete.id}`);
+              await deleteEstimation(estimationToDelete.id);
               setIsDeleteConfirmOpen(false);
               setEstimationToDelete(null);
               fetchEstimations();
@@ -132,22 +154,12 @@ export default function ProjectEstimations() {
     return () => window.removeEventListener('keydown', handler);
   }, [isDeleteConfirmOpen, estimationToDelete]);
 
+  // Removed the duplicate createEstimation function that was using raw axios
+  /* 
   const createEstimation = async (e) => {
-    e.preventDefault();
-    if (!name || !selectedRegion) {
-      setCreateError(!selectedRegion ? "Region should not be empty" : "Estimation name is required");
-      return;
-    }
-    const res = await axios.post(`${API}/projects/${projectId}/estimations`, { estimation_name: name });
-    const created = res.data;
-    try {
-      localStorage.setItem(`estimationRegion:${created.estimation_id}`, selectedRegion);
-    } catch {}
-    setName("");
-    setCreateError("");
-    setIsCreateEstimationModalOpen(false);
-    fetchEstimations();
-  };
+    ...
+  }; 
+  */
 
   const openDeleteConfirm = (id, name) => {
     setEstimationToDelete({ id, name });
@@ -156,7 +168,7 @@ export default function ProjectEstimations() {
   const confirmDeleteEstimation = async () => {
     if (!estimationToDelete) return;
     try {
-      await axios.delete(`${API}/estimations/${estimationToDelete.id}`);
+      await deleteEstimation(estimationToDelete.id);
       setIsDeleteConfirmOpen(false);
       setEstimationToDelete(null);
       fetchEstimations();
@@ -185,7 +197,7 @@ export default function ProjectEstimations() {
       return;
     }
     try {
-      await axios.patch(`${API}/estimations/${editEstimationId}`, { estimation_name: editName || `Estimation #${editEstimationId}` });
+      await updateEstimation(editEstimationId, { estimation_name: editName || `Estimation #${editEstimationId}` });
       try {
         localStorage.setItem(`estimationRegion:${editEstimationId}`, editRegion);
         if (editName) localStorage.setItem(`estimationName:${editEstimationId}`, editName);
@@ -380,28 +392,39 @@ export default function ProjectEstimations() {
                       </Link>
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{localStorage.getItem(`estimationRegion:${es.estimation_id}`) || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">—</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatUser(es.created_by, es.created_by_id)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(es.created_at)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatUser(es.updated_by, es.updated_by_id)}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(es.updated_at)}</td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap text-right">
                       <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
-                          onClick={() => openEditEstimation(es)}
-                          title="Edit Estimation"
+                        <Link
+                          to={`/estimations/${es.estimation_id}`}
+                          className="text-indigo-600 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 px-3 py-1 rounded transition-colors"
+                          title="View Details"
                         >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
-                          onClick={() => openDeleteConfirm(es.estimation_id, es.estimation_name)}
-                          title="Delete Estimation"
-                        >
-                          Delete
-                        </button>
+                          View
+                        </Link>
+                        {(isAdmin || es.created_by_id === user?.user_id) && (
+                          <>
+                            <button
+                              type="button"
+                              className="text-blue-600 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded transition-colors"
+                              onClick={() => openEditEstimation(es)}
+                              title="Edit Estimation"
+                            >
+                              <FaEdit />
+                            </button>
+                            <button
+                              type="button"
+                              className="text-red-600 hover:text-red-900 bg-red-50 hover:bg-red-100 px-3 py-1 rounded transition-colors"
+                              onClick={() => openDeleteConfirm(es.estimation_id, es.estimation_name)}
+                              title="Delete Estimation"
+                            >
+                              <FaTrash />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

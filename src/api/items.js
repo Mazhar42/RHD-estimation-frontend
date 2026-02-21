@@ -1,27 +1,27 @@
-import axios from "axios";
-import { API_BASE } from "./base";
+import { apiClient } from "./axios";
 
 export const listDivisions = async () => {
-  const res = await axios.get(`${API_BASE}/items/divisions`);
+  const res = await apiClient.get(`/items/divisions`);
   return res.data;
 };
 
 export const listItems = async (params = {}) => {
-  const res = await axios.get(`${API_BASE}/items`, { params });
+  const res = await apiClient.get(`/items`, { params });
   return res.data;
 };
 
 export const createItem = async (payload) => {
-  const res = await axios.post(`${API_BASE}/items`, payload);
+  const res = await apiClient.post(`/items`, payload);
   return res.data;
 };
 
-export const importItems = async (file, mode = "append") => {
+export const importItems = async (file, mode = "append", onUploadProgress) => {
   const form = new FormData();
   form.append("file", file);
-  const res = await axios.post(`${API_BASE}/items/import`, form, {
+  const res = await apiClient.post(`/items/import`, form, {
     params: { mode },
-    headers: { "Content-Type": "multipart/form-data" },
+    headers: {}, // Let axios automatically set Content-Type with proper boundary
+    onUploadProgress: onUploadProgress,
   });
   return res.data;
 };
