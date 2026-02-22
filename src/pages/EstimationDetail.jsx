@@ -13,6 +13,8 @@ import {
   approveSpecialItemRequest,
   rejectSpecialItemRequest,
   createSpecialItemRequest,
+  updateSpecialItemRequest,
+  deleteSpecialItemRequest,
 } from "../api/estimations";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
@@ -737,8 +739,27 @@ export default function EstimationDetail() {
 
   const handleDeleteSelected = async () => {
     try {
-      await deleteEstimationLines(selectedLineIds);
-      fetchLines();
+      const requestIds = [];
+      const lineIds = [];
+      
+      selectedLineIds.forEach(id => {
+         if (String(id).startsWith('req-')) {
+             requestIds.push(parseInt(id.replace('req-', '')));
+         } else {
+             lineIds.push(id);
+         }
+      });
+      
+      if (lineIds.length > 0) {
+        await deleteEstimationLines(lineIds);
+        fetchLines();
+      }
+      
+      if (requestIds.length > 0) {
+        await Promise.all(requestIds.map(id => deleteSpecialItemRequest(id)));
+        fetchSpecialItemRequests();
+      }
+
       setSelectedLineIds([]);
       setIsDeleteLinesModalOpen(false);
     } catch (error) {
@@ -793,10 +814,27 @@ export default function EstimationDetail() {
 
   const handleUpdateLine = async (updatedLineData) => {
     try {
-      await updateEstimationLine(editingLine.line_id, updatedLineData);
+      if (editingLine.is_request) {
+        const { item_id, ...cleanUpdatedData } = updatedLineData;
+        const payload = {
+            division_id: editingLine.item.division_id,
+            item_description: editingLine.item.item_description,
+            unit: editingLine.item.unit,
+            rate: editingLine.rate,
+            region: editingLine.item.region || "Default",
+            organization: editingLine.item.organization || "RHD",
+            attachment_name: editingLine.attachment_name,
+            attachment_base64: editingLine.attachment_base64,
+            ...cleanUpdatedData
+        };
+        await updateSpecialItemRequest(editingLine.request_id, payload);
+        fetchSpecialItemRequests();
+      } else {
+        await updateEstimationLine(editingLine.line_id, updatedLineData);
+        fetchLines();
+      }
       setIsEditModalOpen(false);
       setEditingLine(null);
-      fetchLines();
       setSelectedLineIds([]);
     } catch (error) {
       console.error("Failed to update line", error);
@@ -899,7 +937,7 @@ export default function EstimationDetail() {
     };
 
     addGroupsToAoa(standardGroups, "Item Master");
-    addGroupsToAoa(specialGroups, "Special Item");
+    addGroupsToAoa(specialGroups, "Special Item Requests");
 
     // Add grand total row
     aoa.push(["", "", "", "", "", "", "", "", "", "Grand Total", grandTotal]);
@@ -1041,13 +1079,28 @@ export default function EstimationDetail() {
 
     const drawHeaderFooter = () => {
       // Header
-      doc.setFontSize(12);
-      doc.text(`${title} — ${region || 'No Region'}`, pageMargin.left, 40);
-      // Footer with page numbers
-      const str = `Page ${doc.getNumberOfPages()}`;
+      doc.setFillColor(31, 41, 55); // Dark gray bg
+      doc.rect(0, 0, doc.internal.pageSize.getWidth(), 60, 'F');
+      
+      doc.setFontSize(16);
+      doc.setTextColor(255, 255, 255);
+      doc.setFont(undefined, 'bold');
+      doc.text(title, pageMargin.left, 35);
+      
       doc.setFontSize(10);
+      doc.setFont(undefined, 'normal');
+      doc.text(`Region: ${region || 'No Region'}`, pageMargin.left, 50);
+      doc.text(`Date: ${new Date().toLocaleDateString()}`, doc.internal.pageSize.getWidth() - pageMargin.right - 100, 35);
+
+      // Footer with page numbers
+      doc.setTextColor(100, 100, 100);
+      const str = `Page ${doc.getNumberOfPages()}`;
+      doc.setFontSize(9);
       doc.text(str, doc.internal.pageSize.getWidth() - pageMargin.right - doc.getTextWidth(str), doc.internal.pageSize.getHeight() - 20);
     };
+
+    // Draw header on the first page immediately
+    drawHeaderFooter();
 
     const pageHeight = doc.internal.pageSize.getHeight();
     const usableBottom = pageHeight - pageMargin.bottom;
@@ -1095,10 +1148,14 @@ export default function EstimationDetail() {
     const standardGroups = groupLines(standardLines);
     const specialGroups = groupLines(specialLines);
 
-    // Flow divisions one after another; add a page only if needed
-    let currentY = pageMargin.top;
+    // Calculate totals for sections
+    const standardTotal = standardLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+    const specialTotal = specialLines.reduce((sum, line) => sum + (line.amount || 0), 0);
 
-    const addGroupsToPdf = (groups, sectionTitle) => {
+    // Flow divisions one after another; add a page only if needed
+    let currentY = pageMargin.top + 20;
+
+    const addGroupsToPdf = (groups, sectionTitle, sectionTotal) => {
       if (Object.keys(groups).length === 0) return;
 
       // Section Title
@@ -1106,13 +1163,16 @@ export default function EstimationDetail() {
         if (currentY > usableBottom - 50) {
           doc.addPage();
           drawHeaderFooter();
-          currentY = pageMargin.top;
+          currentY = pageMargin.top + 20;
         }
-        doc.setFontSize(14);
+        doc.setFillColor(240, 240, 240);
+        doc.rect(pageMargin.left, currentY - 15, doc.internal.pageSize.getWidth() - pageMargin.left - pageMargin.right, 25, 'F');
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
         doc.setFont(undefined, 'bold');
-        doc.text(sectionTitle.toUpperCase(), pageMargin.left, currentY + 10);
+        doc.text(sectionTitle.toUpperCase(), pageMargin.left + 5, currentY);
         doc.setFont(undefined, 'normal');
-        currentY += 35;
+        currentY += 30;
       }
 
       Object.entries(groups).forEach(([divisionName, divisionLines], idx) => {
@@ -1120,13 +1180,16 @@ export default function EstimationDetail() {
         if (currentY > usableBottom - 50) {
           doc.addPage();
           drawHeaderFooter();
-          currentY = pageMargin.top;
+          currentY = pageMargin.top + 20;
         }
 
         // Division heading
-        doc.setFontSize(11);
-        doc.text(`Division: ${divisionName}`, pageMargin.left, currentY + 10);
-        currentY += 20;
+        doc.setFontSize(10);
+        doc.setTextColor(50, 50, 50);
+        doc.setFont(undefined, 'bold');
+        doc.text(`Division: ${divisionName}`, pageMargin.left, currentY);
+        doc.setFont(undefined, 'normal');
+        currentY += 15;
 
         const body = divisionLines.map(l => [
           l.item?.item_code || '',
@@ -1139,7 +1202,7 @@ export default function EstimationDetail() {
           (l.calculated_qty ?? l.quantity) ?? '',
           l.rate ?? '',
           l.item?.unit || '',
-          l.amount ? l.amount.toFixed(2) : '',
+          l.amount ? l.amount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '',
         ]);
         const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
 
@@ -1147,62 +1210,78 @@ export default function EstimationDetail() {
           startY: currentY,
           margin: pageMargin,
           head: [[
-            'Item Code','Description','Sub Desc','No.','Length','Width','Thickness','Quantity','Rate','Unit','Amount'
+            'Item Code','Description','Sub Desc','No.','Length','Width','Thickness','Qty','Rate','Unit','Amount'
           ]],
           body,
-          foot: [['Subtotal','','','','','','','','','', divisionSubtotal.toFixed(2)]],
-          styles: { fontSize: 9, cellPadding: 3, overflow: 'linebreak' },
-          headStyles: { fillColor: [22,160,133], textColor: 255 },
+          foot: [['Subtotal','','','','','','','','','', divisionSubtotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})]],
+          styles: { fontSize: 8, cellPadding: 3, overflow: 'linebreak', lineColor: [220, 220, 220], lineWidth: 0.1 },
+          headStyles: { fillColor: [55, 65, 81], textColor: 255, fontStyle: 'bold' },
+          footStyles: { fillColor: [243, 244, 246], textColor: [17, 24, 39], fontStyle: 'bold', halign: 'right' },
           columnStyles: {
-            0: { cellWidth: 55 },
+            0: { cellWidth: 50 },
             1: { cellWidth: 140 },
-            2: { cellWidth: 110 },
-            3: { cellWidth: 35, halign: 'right' },
-            4: { cellWidth: 45, halign: 'right' },
-            5: { cellWidth: 45, halign: 'right' },
-            6: { cellWidth: 50, halign: 'right' },
-            7: { cellWidth: 55, halign: 'right' },
-            8: { cellWidth: 50, halign: 'right' },
-            9: { cellWidth: 50, halign: 'center' },
-            10: { cellWidth: 70, halign: 'right' },
+            2: { cellWidth: 100 },
+            3: { cellWidth: 30, halign: 'right' },
+            4: { cellWidth: 40, halign: 'right' },
+            5: { cellWidth: 40, halign: 'right' },
+            6: { cellWidth: 40, halign: 'right' },
+            7: { cellWidth: 40, halign: 'right' },
+            8: { cellWidth: 40, halign: 'right' },
+            9: { cellWidth: 30, halign: 'center' },
+            10: { cellWidth: 60, halign: 'right' },
           },
-          didDrawPage: () => drawHeaderFooter(),
+          didDrawPage: (data) => {
+              // Header is drawn initially and on manual page breaks.
+              // autoTable also triggers this. We can ensure we don't overdraw or just let it be.
+              // To be safe against missing headers on auto-generated page breaks:
+              if (data.pageNumber > 1 && data.pageCount === 1) {
+                 drawHeaderFooter();
+              }
+          },
         });
 
         // Update currentY to position next table below the finished one
-        currentY = (doc.lastAutoTable?.finalY || pageMargin.top) + 30;
+        currentY = (doc.lastAutoTable?.finalY || pageMargin.top) + 25;
       });
-    };
 
-    addGroupsToPdf(standardGroups, "Item Master");
-    addGroupsToPdf(specialGroups, "Special Item");
-
-    // Summary page
-    doc.addPage();
-    drawHeaderFooter();
-    doc.setFontSize(18);
-    doc.text('Estimation Summary', pageMargin.left, 100);
-    doc.setFontSize(12);
-    doc.text(`Grand Total: ${grandTotal.toFixed(2)}`, pageMargin.left, 140);
-    // Division subtotals
-    let y = 180;
-
-    const printSubtotals = (groups, title) => {
-      if (Object.keys(groups).length === 0) return;
+      // Section Total
+      if (currentY > usableBottom - 30) {
+        doc.addPage();
+        drawHeaderFooter();
+        currentY = pageMargin.top + 30;
+      }
+      doc.setFillColor(229, 231, 235); // Gray-200
+      doc.rect(doc.internal.pageSize.getWidth() - pageMargin.right - 250, currentY - 10, 250, 25, 'F');
+      doc.setFontSize(11);
       doc.setFont(undefined, 'bold');
-      doc.text(title, pageMargin.left, y);
-      doc.setFont(undefined, 'normal');
-      y += 20;
-      Object.entries(groups).forEach(([divisionName, divisionLines]) => {
-        const subtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
-        doc.text(`${divisionName}: ${subtotal.toFixed(2)}`, pageMargin.left + 10, y);
-        y += 22;
-      });
-      y += 10;
+      doc.setTextColor(0, 0, 0);
+      doc.text(`Grand Total (${sectionTitle}): ${sectionTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, doc.internal.pageSize.getWidth() - pageMargin.right - 10, currentY + 7, { align: 'right' });
+      currentY += 40;
     };
 
-    printSubtotals(standardGroups, "Item Master");
-    printSubtotals(specialGroups, "Special Item");
+    addGroupsToPdf(standardGroups, "Item Master", standardTotal);
+    addGroupsToPdf(specialGroups, "Special Item", specialTotal);
+
+    // Grand Total All Items
+    if (currentY > usableBottom - 50) {
+        doc.addPage();
+        drawHeaderFooter();
+        currentY = pageMargin.top + 50;
+    }
+    
+    // Big Grand Total Box
+    currentY += 20;
+    doc.setDrawColor(16, 185, 129); // Emerald-500
+    doc.setLineWidth(2);
+    doc.rect(pageMargin.left, currentY, doc.internal.pageSize.getWidth() - pageMargin.left - pageMargin.right, 50);
+    
+    doc.setFontSize(18);
+    doc.setTextColor(16, 185, 129); // Emerald-500
+    doc.setFont(undefined, 'bold');
+    doc.text("GRAND TOTAL (ALL ITEMS)", pageMargin.left + 20, currentY + 32);
+    
+    doc.setTextColor(0, 0, 0);
+    doc.text(grandTotal.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}), doc.internal.pageSize.getWidth() - pageMargin.right - 20, currentY + 32, { align: 'right' });
 
     doc.save(`estimation_${estimationId}.pdf`);
   };
@@ -1252,6 +1331,15 @@ export default function EstimationDetail() {
 
     // For Special Item tab and Summary tab, also append pending/rejected requests
     if (activeTab === 'special' || activeTab === 'summary') {
+        // First, iterate over existing lines that are special items (Approved ones) and ensure they have 'approved' status
+        Object.values(groups).forEach(groupLines => {
+            groupLines.forEach(l => {
+                if (l.item?.special_item && !l.status) {
+                    l.status = 'approved';
+                }
+            });
+        });
+
         // Group requests by division
         specialRequests.forEach(req => {
             // We only show pending/rejected here. Approved ones become lines.
@@ -1458,10 +1546,12 @@ export default function EstimationDetail() {
                     {canEdit && (
                       <>
                         <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={openEditModal}>Edit</button>
-                        <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded flex items-center gap-1" onClick={handleDuplicateSelected}>
-                          <FaCopy className="w-3 h-3" />
-                          <span>Duplicate</span>
-                        </button>
+                        {activeTab !== 'special' && (
+                          <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded flex items-center gap-1" onClick={handleDuplicateSelected}>
+                            <FaCopy className="w-3 h-3" />
+                            <span>Duplicate</span>
+                          </button>
+                        )}
                         <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={openDeleteLinesModal}>Delete</button>
                       </>
                     )}
@@ -1471,10 +1561,12 @@ export default function EstimationDetail() {
                   <>
                     {canEdit && (
                       <>
-                        <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded flex items-center gap-1" onClick={handleDuplicateSelected}>
-                          <FaCopy className="w-3 h-3" />
-                          <span>Duplicate</span>
-                        </button>
+                        {activeTab !== 'special' && (
+                          <button className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded flex items-center gap-1" onClick={handleDuplicateSelected}>
+                            <FaCopy className="w-3 h-3" />
+                            <span>Duplicate</span>
+                          </button>
+                        )}
                         <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={openDeleteLinesModal}>Delete</button>
                       </>
                     )}
@@ -1500,7 +1592,7 @@ export default function EstimationDetail() {
           className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'special' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
           onClick={() => setActiveTab('special')}
         >
-          Special Item Master
+          Special Item Requests
         </button>
         <button
           className={`px-4 py-2 text-sm font-medium focus:outline-none ${activeTab === 'summary' ? 'text-teal-600 border-b-2 border-teal-600' : 'text-gray-500 hover:text-gray-700'}`}
@@ -1512,6 +1604,136 @@ export default function EstimationDetail() {
 
       {/* Scrollable table container */}
       <div className="overflow-auto max-h-[75vh] pr-2">
+      {activeTab === 'summary' ? (
+        <div className="space-y-12">
+            {(() => {
+                const groupLines = (list) => {
+                    return list.reduce((acc, line) => {
+                        const divisionName = line.item?.division?.name || 'Uncategorized';
+                        const orgName = (line.item?.organization || 'RHD');
+                        const label = orgName && orgName !== 'RHD' ? `${divisionName} (${orgName})` : divisionName;
+                        if (!acc[label]) acc[label] = [];
+                        acc[label].push(line);
+                        return acc;
+                    }, {});
+                };
+
+                const standardLines = lines.filter(l => !l.item?.special_item);
+                const approvedSpecialLines = lines.filter(l => l.item?.special_item);
+                const pendingSpecialLines = specialRequests.filter(req => req.status !== 'approved').map(req => ({
+                    line_id: `req-${req.request_id}`,
+                    item: {
+                        item_code: req.item_code || `SP-${String(req.division_id).padStart(2, '0')}/01/${String(req.request_id).padStart(3, '0')}`,
+                        item_description: req.item_description,
+                        division: req.division,
+                        division_id: req.division_id,
+                        organization: req.organization,
+                        unit: req.unit,
+                        special_item: true
+                    },
+                    sub_description: req.sub_description,
+                    no_of_units: req.no_of_units,
+                    length: req.length,
+                    width: req.width,
+                    thickness: req.thickness,
+                    quantity: req.quantity,
+                    calculated_qty: req.quantity,
+                    rate: req.rate,
+                    amount: (req.quantity || 0) * (req.rate || 0),
+                    status: req.status || 'approved'
+                }));
+                
+                const specialLines = [...approvedSpecialLines, ...pendingSpecialLines];
+                
+                const standardGroups = groupLines(standardLines);
+                const specialGroups = groupLines(specialLines);
+
+                const standardTotal = standardLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+                const specialTotal = specialLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+                const grandTotal = standardTotal + specialTotal;
+
+                const renderSection = (groups, title, sectionTotal) => {
+                    if (Object.keys(groups).length === 0) return null;
+                    return (
+                        <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+                            <div className="bg-gray-100 px-6 py-4 border-b border-gray-200">
+                                <h3 className="text-lg font-bold text-gray-800 uppercase tracking-wide">{title}</h3>
+                            </div>
+                            <div className="p-6 space-y-8">
+                                {Object.entries(groups).map(([divisionName, divisionLines]) => {
+                                    const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
+                                    return (
+                                        <div key={divisionName} className="space-y-3">
+                                            <h4 className="text-md font-semibold text-gray-700 border-l-4 border-teal-500 pl-3">{divisionName}</h4>
+                                            <div className="overflow-x-auto rounded-lg border border-gray-100">
+                                                <table className="min-w-full text-xs">
+                                                    <thead className="bg-gray-50">
+                                                        <tr>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Item Code</th>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Description</th>
+                                                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Sub Desc</th>
+                                                            <th className="px-3 py-2 text-right font-semibold text-gray-600">No.</th>
+                                                            <th className="px-3 py-2 text-right font-semibold text-gray-600">Dims (L/W/T)</th>
+                                                            <th className="px-3 py-2 text-right font-semibold text-gray-600">Qty</th>
+                                                            <th className="px-3 py-2 text-right font-semibold text-gray-600">Rate</th>
+                                                            <th className="px-3 py-2 text-right font-semibold text-gray-600">Amount</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-gray-100">
+                                                        {divisionLines.map(l => (
+                                                            <tr key={l.line_id} className="hover:bg-gray-50">
+                                                                <td className="px-3 py-2 font-medium text-gray-900">{l.item?.item_code}</td>
+                                                                <td className="px-3 py-2 text-gray-600">{l.item?.item_description}</td>
+                                                                <td className="px-3 py-2 text-gray-500 italic">{l.sub_description}</td>
+                                                                <td className="px-3 py-2 text-right text-gray-600">{l.no_of_units}</td>
+                                                                <td className="px-3 py-2 text-right text-gray-600">
+                                                                    {[l.length, l.width, l.thickness].filter(x=>x!=null && x!=="").join(' / ')}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-gray-600 font-medium">{(l.calculated_qty ?? l.quantity)} {l.item?.unit}</td>
+                                                                <td className="px-3 py-2 text-right text-gray-600">{l.rate}</td>
+                                                                <td className="px-3 py-2 text-right text-gray-900">{formatAmount(l.amount)}</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                    <tfoot>
+                                                        <tr className="bg-gray-50 font-semibold">
+                                                            <td colSpan={7} className="px-3 py-2 text-right text-gray-700">Subtotal</td>
+                                                            <td className="px-3 py-2 text-right text-gray-900">{formatAmount(divisionSubtotal)}</td>
+                                                        </tr>
+                                                    </tfoot>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <div className="bg-gray-50 px-6 py-4 border-t border-gray-200 flex justify-end">
+                                <div className="text-right">
+                                    <span className="block text-sm text-gray-500 font-medium">Grand Total ({title})</span>
+                                    <span className="block text-xl font-bold text-gray-900">{formatAmount(sectionTotal)}</span>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                };
+
+                return (
+                    <>
+                        {renderSection(standardGroups, "Item Master", standardTotal)}
+                        {renderSection(specialGroups, "Special Items", specialTotal)}
+                        
+                        <div className="mt-12 mb-8 bg-emerald-50 border-2 border-emerald-500 rounded-xl p-8 flex flex-col sm:flex-row justify-between items-center shadow-md">
+                            <h2 className="text-2xl sm:text-3xl font-bold text-emerald-800 uppercase tracking-tight">Grand Total (All Items)</h2>
+                            <div className="text-3xl sm:text-4xl font-extrabold text-emerald-700 mt-4 sm:mt-0">
+                                {formatAmount(grandTotal)}
+                            </div>
+                        </div>
+                    </>
+                );
+            })()}
+        </div>
+      ) : (
+      <>
       {Object.entries(groupedLines).map(([divisionName, divisionLines]) => {
         const divisionSubtotal = divisionLines.reduce((sum, line) => sum + (line.amount || 0), 0);
         
@@ -1722,12 +1944,15 @@ export default function EstimationDetail() {
           </div>
         );
       })}
-
-      <div className="flex justify-end mt-4">
+      
+      <div className="flex justify-end mt-4 pb-4">
         <div className="inline-flex items-center gap-3 bg-gradient-to-r from-teal-50 to-emerald-50 text-teal-900 border border-teal-200 rounded-lg px-4 py-2 shadow-sm">
-          <span className="text-sm font-semibold">Grand Total {activeTab === 'summary' ? '(All Items)' : activeTab === 'special' ? '(Special Items)' : '(Standard Items)'}</span>
+          <span className="text-sm font-semibold">Grand Total {activeTab === 'special' ? '(Special Items)' : '(Standard Items)'}</span>
           <span className="text-xl font-bold">{formatAmount(currentViewTotal)}</span>
         </div>
+      </div>
+      </>
+      )}
       </div>
 
       {isAddLineModalOpen && (
@@ -1895,8 +2120,7 @@ export default function EstimationDetail() {
         </div>
       )}
     </div>
-  </div>
-  );
+  )
 }
 
 // NOTE: Import modal temporarily rendered inline above to bypass a parser error.
@@ -2041,6 +2265,13 @@ function AddLineModal({ items, lines, onClose, onSave, onRequestSubmitted, estim
         setSubmitError('Attachment is required for Special Item.');
         return;
       }
+
+      // Default attachment name to filename if not provided
+      let finalAttachmentName = (attachmentName || '').trim();
+      if (!finalAttachmentName && selectedFileName) {
+          finalAttachmentName = selectedFileName;
+      }
+
       try {
         setIsSubmitting(true);
         setSubmitError("");
@@ -2052,7 +2283,7 @@ function AddLineModal({ items, lines, onClose, onSave, onRequestSubmitted, estim
           rate: newItemRate ? parseFloat(newItemRate) : null,
           region: selectedRegion || region || "Default",
           organization: selectedOrganizationName || "RHD",
-          attachment_name: attachmentName || null,
+          attachment_name: finalAttachmentName || null,
           attachment_base64: attachmentBase64,
           sub_description: form.sub_description || null,
           no_of_units: noUnitsResult.value ?? 1,
@@ -2091,30 +2322,6 @@ function AddLineModal({ items, lines, onClose, onSave, onRequestSubmitted, estim
 
     const sanitize = (key, val) => (allowed.includes(key) ? val : null);
 
-    const existingNames = (lines || []).map(l => l.attachment_name).filter(Boolean);
-    const formatName = (n) => `A-${String(n).padStart(2,'0')}`;
-    const nextUniqueName = () => {
-      let n = 1;
-      while (existingNames.includes(formatName(n))) n++;
-      return formatName(n);
-    };
-    let finalAttachmentName = (attachmentName || '').trim();
-    if (activeTab === 'special') {
-      if (!finalAttachmentName) {
-        finalAttachmentName = nextUniqueName();
-      } else if (existingNames.includes(finalAttachmentName)) {
-        finalAttachmentName = nextUniqueName();
-      }
-      
-      // Ensure extension matches the uploaded file
-      if (selectedFileName && selectedFileName.includes('.')) {
-          const ext = selectedFileName.split('.').pop();
-          if (ext && !finalAttachmentName.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) {
-              finalAttachmentName += `.${ext}`;
-          }
-      }
-    }
-
     const payload = {
       item_id: parseInt(finalItemId),
       sub_description: form.sub_description || null,
@@ -2127,8 +2334,8 @@ function AddLineModal({ items, lines, onClose, onSave, onRequestSubmitted, estim
       width_expr: widthResult.expr,
       thickness_expr: thicknessResult.expr,
       quantity: sanitize('quantity', form.quantity ? parseFloat(form.quantity) : null),
-      attachment_name: activeTab === 'special' && attachmentBase64 ? finalAttachmentName : null,
-      attachment_base64: activeTab === 'special' && attachmentBase64 ? attachmentBase64 : null,
+      attachment_name: null,
+      attachment_base64: null,
     };
 
     try {

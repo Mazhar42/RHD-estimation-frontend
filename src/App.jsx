@@ -138,7 +138,7 @@ function AppContent() {
                       Notifications
                     </Link>
                   )}
-                  {hasRole("superadmin") && (
+                  {(hasRole("admin") || hasRole("superadmin")) && (
                     <Link
                       to="/admin/users"
                       className="text-xs px-3 py-1 rounded text-white hover:bg-teal-800 focus:outline-none focus:ring-1 focus:ring-white/60"
@@ -225,7 +225,7 @@ function AppContent() {
                   <Route
                     path="/admin/users"
                     element={
-                      <ProtectedRoute requiredRole="superadmin">
+                      <ProtectedRoute requiredRole={["admin", "superadmin"]}>
                         <UserManagerPage />
                       </ProtectedRoute>
                     }
@@ -259,7 +259,7 @@ function AppContent() {
                     <nav className="flex flex-col gap-2">
                       <Link to="/products" className="px-3 py-2 rounded hover:bg-teal-800" onClick={() => setIsLauncherOpen(false)}>Items</Link>
                       <Link to="/projects" className="px-3 py-2 rounded hover:bg-teal-800" onClick={() => setIsLauncherOpen(false)}>Projects</Link>
-                      {hasRole("superadmin") && (
+                      {(hasRole("admin") || hasRole("superadmin")) && (
                         <Link to="/admin/users" className="px-3 py-2 rounded hover:bg-teal-800" onClick={() => setIsLauncherOpen(false)}>Users</Link>
                       )}
                       <Link to="/profile" className="px-3 py-2 rounded hover:bg-teal-800" onClick={() => setIsLauncherOpen(false)}>Profile</Link>

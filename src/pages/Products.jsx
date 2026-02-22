@@ -157,14 +157,14 @@ export default function Products() {
   }, [orgRegions, makeInitialRegionRates]);
 
   useEffect(() => {
-    const units = [...new Set(items.map(item => item.unit))];
+    const units = [...new Set([...items, ...specialItems].map(item => item.unit).filter(Boolean))];
     setUniqueUnits(units);
-  }, [items]);
+  }, [items, specialItems]);
 
   useEffect(() => {
-    const regions = orgRegions.length ? orgRegions : [...new Set(items.map(item => item.region === 'Cumilla Zone' ? 'Comilla Zone' : item.region).filter(Boolean))];
+    const regions = orgRegions.length ? orgRegions : [...new Set([...items, ...specialItems].map(item => item.region === 'Cumilla Zone' ? 'Comilla Zone' : item.region).filter(Boolean))];
     setUniqueRegions(regions);
-  }, [items, orgRegions]);
+  }, [items, specialItems, orgRegions]);
 
   // Keyboard shortcuts for Add Division modal: Esc to cancel, Enter to add
   useEffect(() => {
@@ -502,7 +502,11 @@ export default function Products() {
     await apiClient.put(`/items/${editItem.item_id}`, payload);
     setEditItem(null);
     setIsEditModalOpen(false);
-    fetchItems(selectedOrg?.name);
+    if (activeTab === 'special') {
+      await fetchSpecialItems(selectedOrg?.name);
+    } else {
+      await fetchItems(selectedOrg?.name);
+    }
   };
 
   const deleteItem = async (item_id) => {
@@ -593,7 +597,7 @@ export default function Products() {
     return () => clearTimeout(t);
   }, [importBanner]);
 
-  const filteredItems = items.filter(item => {
+  const filteredItems = React.useMemo(() => items.filter(item => {
     const rate = parseFloat(search.rate);
     let rateMatch = true;
     if (!isNaN(rate)) {
@@ -613,7 +617,7 @@ export default function Products() {
       (search.rate === '' || rateMatch) &&
       (!search.region || item.region === search.region)
     );
-  });
+  }), [items, search]);
 
   const getColumnValue = (item, column) => {
     switch (column) {
@@ -757,31 +761,35 @@ export default function Products() {
   };
 
   // Group items by Division + Code to pivot rates across regions
-  const groupedMap = new Map();
-  for (const it of items) {
-    const key = `${it.division_id}|${it.item_code}`;
-    if (!groupedMap.has(key)) {
-      groupedMap.set(key, {
-        division: it.division,
-        division_id: it.division_id,
-        item_code: it.item_code,
-        item_description: it.item_description,
-        unit: it.unit,
-        organization: it.organization || "RHD",
-        rates: {},
-      });
+  const groupedRows = React.useMemo(() => {
+    const groupedMap = new Map();
+    for (const it of items) {
+      const key = `${it.division_id}|${it.item_code}`;
+      if (!groupedMap.has(key)) {
+        groupedMap.set(key, {
+          division: it.division,
+          division_id: it.division_id,
+          item_code: it.item_code,
+          item_description: it.item_description,
+          unit: it.unit,
+          organization: it.organization || "RHD",
+          rates: {},
+        });
+      }
+      const normalizedRegion = it.region;
+      groupedMap.get(key).rates[normalizedRegion] = it.rate;
     }
-    const normalizedRegion = it.region;
-    groupedMap.get(key).rates[normalizedRegion] = it.rate;
-  }
-  const groupedRows = Array.from(groupedMap.values());
-  const groupedFilteredRows = groupedRows.filter(row => (
+    return Array.from(groupedMap.values());
+  }, [items]);
+
+  const groupedFilteredRows = React.useMemo(() => groupedRows.filter(row => (
     (!search.division || (row.division?.name || '').toLowerCase().includes(search.division.toLowerCase())) &&
     (!search.code || row.item_code.toLowerCase().includes(search.code.toLowerCase())) &&
     (!search.description || row.item_description.toLowerCase().includes(search.description.toLowerCase())) &&
     (!search.unit || row.unit === search.unit) &&
     (!search.organization || (row.organization || '').toLowerCase().includes(search.organization.toLowerCase()))
-  ));
+  )), [groupedRows, search]);
+
   const indexOfLastItem = currentPage * itemsPerPage;
   const indexOfFirstItem = indexOfLastItem - itemsPerPage;
   const currentItems = groupedFilteredRows.slice(indexOfFirstItem, indexOfLastItem);
@@ -793,6 +801,117 @@ export default function Products() {
   const tableScrollRef = useRef(null);
   const bottomPaginationRef = useRef(null);
   const [tableScrollHeight, setTableScrollHeight] = useState(null);
+  const [columnWidths, setColumnWidths] = useState(() => {
+    try {
+      const saved = localStorage.getItem("productsColumnWidths");
+      return saved ? JSON.parse(saved) : { division: 150, code: 150, description: 300 };
+    } catch {
+      return { division: 150, code: 150, description: 300 };
+    }
+  });
+  const [specialColumnWidths, setSpecialColumnWidths] = useState(() => {
+    try {
+      const saved = localStorage.getItem("productsSpecialColumnWidths");
+      return saved ? JSON.parse(saved) : { division: 150, code: 150, description: 300 };
+    } catch {
+      return { division: 150, code: 150, description: 300 };
+    }
+  });
+  const [specialSearch, setSpecialSearch] = useState({ division: "", code: "", description: "", unit: "", rate: "", rateOperator: "==", region: "", organization: "" });
+  const [selectedSpecialItemIds, setSelectedSpecialItemIds] = useState([]);
+  const [isDeleteSelectedSpecialConfirmOpen, setIsDeleteSelectedSpecialConfirmOpen] = useState(false);
+
+  const [specialCurrentPage, setSpecialCurrentPage] = useState(1);
+  const [specialItemsPerPage, setSpecialItemsPerPage] = useState(50);
+
+  const isSpecialSearchActive = () => {
+    return Boolean(
+      specialSearch.division ||
+      specialSearch.code ||
+      specialSearch.description ||
+      specialSearch.unit ||
+      specialSearch.rate ||
+      specialSearch.region ||
+      specialSearch.organization ||
+      (specialSearch.rateOperator && specialSearch.rateOperator !== '==')
+    );
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem("productsColumnWidths", JSON.stringify(columnWidths));
+      } catch {}
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [columnWidths]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem("productsSpecialColumnWidths", JSON.stringify(specialColumnWidths));
+      } catch {}
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [specialColumnWidths]);
+
+  const resizingRef = useRef(null); // { column, startX, startWidth, isSpecial }
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!resizingRef.current) return;
+      const { column, startX, startWidth, isSpecial } = resizingRef.current;
+      const diff = e.clientX - startX;
+      if (isSpecial) {
+        setSpecialColumnWidths(prev => ({
+          ...prev,
+          [column]: Math.max(50, startWidth + diff)
+        }));
+      } else {
+        setColumnWidths(prev => ({
+          ...prev,
+          [column]: Math.max(50, startWidth + diff)
+        }));
+      }
+    };
+
+    const handleMouseUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = null;
+        document.body.style.cursor = 'default';
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  const startResizing = (e, column) => {
+    e.preventDefault();
+    resizingRef.current = {
+      column,
+      startX: e.clientX,
+      startWidth: columnWidths[column],
+      isSpecial: false
+    };
+    document.body.style.cursor = 'col-resize';
+  };
+
+  const startResizingSpecial = (e, column) => {
+    e.preventDefault();
+    resizingRef.current = {
+      column,
+      startX: e.clientX,
+      startWidth: specialColumnWidths[column],
+      isSpecial: true
+    };
+    document.body.style.cursor = 'col-resize';
+  };
+
   // Single-select grouped row (Division + Code)
   const [selectedGroupKey, setSelectedGroupKey] = useState(null);
   const [isEditGroupModalOpen, setIsEditGroupModalOpen] = useState(false);
@@ -919,8 +1038,13 @@ export default function Products() {
       }
       await Promise.all(ops);
       setIsEditGroupModalOpen(false);
+      const wasSpecial = editGroupForm.isSpecial;
       setEditGroupForm(null);
-      await fetchItems();
+      if (wasSpecial) {
+        await fetchSpecialItems(selectedOrg?.name);
+      } else {
+        await fetchItems(selectedOrg?.name);
+      }
       setToast('Grouped item updated successfully');
       setTimeout(() => setToast(null), 2500);
     } catch (err) {
@@ -1002,6 +1126,93 @@ export default function Products() {
     return () => window.removeEventListener('resize', computeHeight);
   }, []);
 
+  const groupedSpecialRows = React.useMemo(() => {
+    const groupedMap = new Map();
+    for (const it of specialItems) {
+      const key = `${it.division_id}|${it.item_code}`;
+      if (!groupedMap.has(key)) {
+        groupedMap.set(key, {
+          division: it.division,
+          division_id: it.division_id,
+          item_code: it.item_code,
+          item_description: it.item_description,
+          unit: it.unit,
+          organization: it.organization || "RHD",
+          rates: {},
+          // Keep reference to at least one item_id for selection/editing if needed
+          item_id: it.item_id 
+        });
+      }
+      const normalizedRegion = it.region;
+      groupedMap.get(key).rates[normalizedRegion] = it.rate;
+    }
+    return Array.from(groupedMap.values());
+  }, [specialItems]);
+
+  const groupedFilteredSpecialRows = React.useMemo(() => groupedSpecialRows.filter(row => (
+    (!specialSearch.division || (row.division?.name || '').toLowerCase().includes(specialSearch.division.toLowerCase())) &&
+    (!specialSearch.code || row.item_code.toLowerCase().includes(specialSearch.code.toLowerCase())) &&
+    (!specialSearch.description || row.item_description.toLowerCase().includes(specialSearch.description.toLowerCase())) &&
+    (!specialSearch.unit || row.unit === specialSearch.unit) &&
+    (!specialSearch.organization || (row.organization || '').toLowerCase().includes(specialSearch.organization.toLowerCase()))
+  )), [groupedSpecialRows, specialSearch]);
+
+  const indexOfLastSpecialItem = specialCurrentPage * specialItemsPerPage;
+  const indexOfFirstSpecialItem = indexOfLastSpecialItem - specialItemsPerPage;
+  const currentSpecialItems = groupedFilteredSpecialRows.slice(indexOfFirstSpecialItem, indexOfLastSpecialItem);
+  const totalSpecialPages = Math.ceil(groupedFilteredSpecialRows.length / specialItemsPerPage);
+
+  // Group selection for special items
+  const [selectedSpecialGroupKey, setSelectedSpecialGroupKey] = useState(null);
+  
+  // Helper to get items for a special group
+  const getItemsForSpecialGroup = (key) => {
+    const { division_id, item_code } = parseGroupKey(key);
+    return specialItems.filter(it => String(it.division_id) === String(division_id) && String(it.item_code) === String(item_code));
+  };
+
+  const deleteSelectedSpecialGroup = async () => {
+    if (!selectedSpecialGroupKey) return;
+    const groupItems = getItemsForSpecialGroup(selectedSpecialGroupKey);
+    if (groupItems.length === 0) { setIsDeleteSelectedSpecialConfirmOpen(false); return; }
+    try {
+      const results = await Promise.allSettled(groupItems.map(it => apiClient.delete(`/items/${it.item_id}`)));
+      const succeeded = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.length - succeeded;
+      await fetchSpecialItems(selectedOrg?.name);
+      setSelectedSpecialGroupKey(null);
+      setIsDeleteSelectedSpecialConfirmOpen(false);
+      setToast(`Deleted ${succeeded} item(s). Failed ${failed}.`);
+      setTimeout(() => setToast(null), 3000);
+    } catch (err) {
+      console.error('Grouped special delete failed:', err);
+      const msg = err?.response?.data?.detail || 'Failed to delete grouped special item.';
+      setToast(msg);
+      setTimeout(() => setToast(null), 3000);
+    }
+  };
+
+  const beginEditSelectedSpecialGroup = () => {
+    if (!selectedSpecialGroupKey) return;
+    const groupItems = getItemsForSpecialGroup(selectedSpecialGroupKey);
+    if (groupItems.length === 0) return;
+    const any = groupItems[0];
+    const rates = Object.fromEntries(orgRegions.map(r => [r, '']));
+    for (const it of groupItems) {
+      const r = it.region;
+      rates[r] = it.rate ?? '';
+    }
+    setEditGroupForm({
+      division_id: any.division_id,
+      item_code: any.item_code,
+      item_description: any.item_description,
+      unit: any.unit,
+      organization: any.organization || 'RHD',
+      regionRates: rates,
+      isSpecial: true // Flag to indicate special item edit
+    });
+    setIsEditGroupModalOpen(true);
+  };
 
 
   return (
@@ -1039,45 +1250,159 @@ export default function Products() {
       </div>
 
       {activeTab === "special" && (
-        <div className="mb-6 bg-white border border-gray-200 rounded-lg p-4">
+        <div className="mb-6 bg-white rounded-lg">
           {specialItemsLoading && <div className="text-sm text-gray-600">Loading special items...</div>}
           {specialItemsError && <div className="text-sm text-red-600">{specialItemsError}</div>}
           {!specialItemsLoading && !specialItemsError && (
-            <div className="overflow-x-auto border border-gray-200 rounded-lg">
-              <table className="min-w-full text-sm">
-                <thead className="bg-gray-50 border-b">
-                  <tr>
-                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Division</th>
-                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Code</th>
-                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Description</th>
-                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Unit</th>
-                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Region</th>
-                    <th className="text-right px-3 py-2 text-xs font-semibold text-gray-700">Rate</th>
-                    <th className="text-left px-3 py-2 text-xs font-semibold text-gray-700">Organization</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {specialItems.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
-                        No special items found
-                      </td>
-                    </tr>
-                  )}
-                  {specialItems.map((it) => (
-                    <tr key={it.special_item_id} className="hover:bg-teal-50">
-                      <td className="px-3 py-2 text-gray-800">{it.division?.name || "—"}</td>
-                      <td className="px-3 py-2 text-gray-800">{it.item_code}</td>
-                      <td className="px-3 py-2 text-gray-800">{it.item_description}</td>
-                      <td className="px-3 py-2 text-gray-800">{it.unit || "—"}</td>
-                      <td className="px-3 py-2 text-gray-800">{it.region}</td>
-                      <td className="px-3 py-2 text-gray-800 text-right">{it.rate != null ? formatRate(it.rate) : ""}</td>
-                      <td className="px-3 py-2 text-gray-800">{it.organization || "RHD"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="border rounded-lg flex flex-col border-gray-200">
+                <div className="overflow-x-auto w-full">
+                  <div style={{ height: tableScrollHeight ? `${tableScrollHeight}px` : undefined }} className="overflow-auto">
+                    <table className="min-w-full border-collapse table-fixed">
+                      <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
+                        <tr>
+                          {isAdmin && <th className="px-2 py-1 text-center text-xs font-bold border-r min-w-[40px] text-gray-800 border-gray-200">Sel</th>}
+                          
+                          <th style={{ width: specialColumnWidths.division, minWidth: specialColumnWidths.division }} className="relative px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 group select-none">
+                            Division
+                            <div
+                              className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-20"
+                              onMouseDown={(e) => startResizingSpecial(e, 'division')}
+                            />
+                          </th>
+                          
+                          <th style={{ width: specialColumnWidths.code, minWidth: specialColumnWidths.code }} className="relative px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 group select-none">
+                            Code
+                            <div
+                              className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-20"
+                              onMouseDown={(e) => startResizingSpecial(e, 'code')}
+                            />
+                          </th>
+                          
+                          <th style={{ width: specialColumnWidths.description, minWidth: specialColumnWidths.description }} className="relative px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 group select-none">
+                            Description
+                            <div
+                              className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-20"
+                              onMouseDown={(e) => startResizingSpecial(e, 'description')}
+                            />
+                          </th>
+                          
+                          <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Unit</th>
+                          <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[140px] text-gray-800 border-gray-200">Organization</th>
+                          {orgRegions.map((r) => (
+                            <th key={r} className="px-2 py-1 text-right text-xs font-bold border-r min-w-[140px] text-gray-800 border-gray-200">{r}</th>
+                          ))}
+                        </tr>
+                        <tr>
+                          {isAdmin && <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>}
+                          <th className="px-2 py-1 border-r border-gray-200">
+                            <input type="text" placeholder="Search..." value={specialSearch.division} onChange={(e) => setSpecialSearch({ ...specialSearch, division: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                          </th>
+                          <th className="px-2 py-1 border-r border-gray-200">
+                            <input type="text" placeholder="Search..." value={specialSearch.code} onChange={(e) => setSpecialSearch({ ...specialSearch, code: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                          </th>
+                          <th className="px-2 py-1 border-r border-gray-200">
+                            <input type="text" placeholder="Search..." value={specialSearch.description} onChange={(e) => setSpecialSearch({ ...specialSearch, description: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                          </th>
+                          <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
+                            <input type="text" placeholder="Search..." value={specialSearch.unit} onChange={(e) => setSpecialSearch({ ...specialSearch, unit: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                          </th>
+                          <th className="px-2 py-1 border-r min-w-[140px] border-gray-200">
+                            <input type="text" placeholder="Search..." value={specialSearch.organization} onChange={(e) => setSpecialSearch({ ...specialSearch, organization: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                          </th>
+                          {orgRegions.map((r) => (
+                            <th key={r} className="px-2 py-1 border-r min-w-[140px] border-gray-200"></th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200 bg-white">
+                        {groupedSpecialRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={5 + orgRegions.length + (isAdmin ? 1 : 0)} className="p-4 sm:p-8 text-center text-gray-600">
+                              <div className="flex flex-col items-center">
+                                <div className="text-lg mb-2">📭</div>
+                                <div className="text-sm font-medium">No special items found</div>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : (
+                          currentSpecialItems.map((row, i) => (
+                            <tr key={`${row.item_code}|${row.division_id ?? row.division?.name ?? i}`} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
+                              {isAdmin && (
+                                <td className="px-2 py-1 text-center border-r border-gray-200">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedSpecialGroupKey === `${row.division_id}|${row.item_code}`}
+                                    onChange={() => setSelectedSpecialGroupKey(prev => prev === `${row.division_id}|${row.item_code}` ? null : `${row.division_id}|${row.item_code}`)}
+                                  />
+                                </td>
+                              )}
+                              <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200">{row.division?.name || "—"}</td>
+                              <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200">{row.item_code}</td>
+                              <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200">{row.item_description}</td>
+                              <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.unit || "—"}</td>
+                              <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.organization || "RHD"}</td>
+                              {orgRegions.map((r) => (
+                                <td key={r} className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200 text-right">{row.rates[r] != null && row.rates[r] !== '' ? formatRate(row.rates[r]) : ''}</td>
+                              ))}
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                    {selectedSpecialGroupKey && (
+                      <div className="sticky bottom-0 z-20 bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between">
+                        <div className="text-xs">1 grouped item selected</div>
+                        <div className="flex items-center gap-2">
+                          <button className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded" onClick={() => beginEditSelectedSpecialGroup()}>Edit</button>
+                          <button className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded" onClick={() => setIsDeleteSelectedSpecialConfirmOpen(true)}>Delete</button>
+                          <button className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded" onClick={() => setSelectedSpecialGroupKey(null)}>Clear selection</button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Bottom spacer */}
+                    <div className="sticky bottom-0 h-4 bg-gray-100 border-t border-gray-200" />
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex flex-wrap justify-between items-center p-4 gap-3">
+                <div className="text-xs text-gray-600">
+                  {new Intl.NumberFormat('en-US').format(groupedFilteredSpecialRows.length)} rows
+                </div>
+                <div className="flex items-center gap-2 text-gray-600">
+                  <select
+                    value={specialItemsPerPage}
+                    onChange={(e)=>{ setSpecialItemsPerPage(parseInt(e.target.value,10) || 50); setSpecialCurrentPage(1); }}
+                    className="text-xs border rounded px-2 py-1 text-gray-700"
+                  >
+                    <option value={50}>50 / page</option>
+                    <option value={100}>100 / page</option>
+                    <option value={200}>200 / page</option>
+                    <option value={300}>300 / page</option>
+                  </select>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setSpecialCurrentPage(p => Math.max(p - 1, 1))}
+                      disabled={specialCurrentPage === 1}
+                      className="px-2 py-1 border rounded text-xs disabled:opacity-50 hover:bg-gray-100 text-gray-600"
+                    >
+                      ‹
+                    </button>
+                    <span className="px-2 py-1 text-xs text-gray-600">
+                      Page {specialCurrentPage} of {totalSpecialPages || 1}
+                    </span>
+                    <button
+                      onClick={() => setSpecialCurrentPage(p => Math.min(p + 1, totalSpecialPages || 1))}
+                      disabled={specialCurrentPage === totalSpecialPages || totalSpecialPages === 0}
+                      className="px-2 py-1 border rounded text-xs disabled:opacity-50 hover:bg-gray-100 text-gray-600"
+                    >
+                      ›
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -1865,9 +2190,31 @@ export default function Products() {
               <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
                 <tr>
                   {isAdmin && <th className="px-2 py-1 text-center text-xs font-bold border-r min-w-[40px] text-gray-800 border-gray-200">Sel</th>}
-                  <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Division</th>
-                  <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Code</th>
-                  <th className="px-2 py-1 text-left text-xs font-bold border-r w-[30%] text-gray-800 border-gray-200">Description</th>
+                  
+                  <th style={{ width: columnWidths.division, minWidth: columnWidths.division }} className="relative px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 group select-none">
+                    Division
+                    <div
+                      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-20"
+                      onMouseDown={(e) => startResizing(e, 'division')}
+                    />
+                  </th>
+                  
+                  <th style={{ width: columnWidths.code, minWidth: columnWidths.code }} className="relative px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 group select-none">
+                    Code
+                    <div
+                      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-20"
+                      onMouseDown={(e) => startResizing(e, 'code')}
+                    />
+                  </th>
+                  
+                  <th style={{ width: columnWidths.description, minWidth: columnWidths.description }} className="relative px-2 py-1 text-left text-xs font-bold border-r text-gray-800 border-gray-200 group select-none">
+                    Description
+                    <div
+                      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize bg-transparent group-hover:bg-teal-400 z-20"
+                      onMouseDown={(e) => startResizing(e, 'description')}
+                    />
+                  </th>
+                  
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[120px] sm:min-w-[150px] text-gray-800 border-gray-200">Unit</th>
                   <th className="px-2 py-1 text-left text-xs font-bold border-r min-w-[140px] text-gray-800 border-gray-200">Organization</th>
   {orgRegions.map((r) => (
@@ -1876,14 +2223,14 @@ export default function Products() {
                 </tr>
                 <tr>
                   {isAdmin && <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>}
-                  <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
-                    <input type="text" placeholder="Search..." value={search.division} onChange={(e) => setSearch({ ...search, division: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                  <th className="px-2 py-1 border-r border-gray-200">
+                    <input type="text" placeholder="Search..." value={search.division} onChange={(e) => setSearch({ ...search, division: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
                   </th>
-                  <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
-                    <input type="text" placeholder="Search..." value={search.code} onChange={(e) => setSearch({ ...search, code: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                  <th className="px-2 py-1 border-r border-gray-200">
+                    <input type="text" placeholder="Search..." value={search.code} onChange={(e) => setSearch({ ...search, code: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
                   </th>
-                  <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
-                    <input type="text" placeholder="Search..." value={search.description} onChange={(e) => setSearch({ ...search, description: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
+                  <th className="px-2 py-1 border-r border-gray-200">
+                    <input type="text" placeholder="Search..." value={search.description} onChange={(e) => setSearch({ ...search, description: e.target.value })} className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200" />
                   </th>
                   <th className="px-2 py-1 border-r min-w-[120px] sm:min-w-[150px] border-gray-200">
                     <select value={search.unit} onChange={(e) => setSearch({ ...search, unit: e.target.value })} className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200">
@@ -1922,9 +2269,9 @@ export default function Products() {
                             />
                           </td>
                         )}
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.division?.name ?? "—"}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.item_code}</td>
-                        <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200 max-w-[28rem]" title={row.item_description}>{row.item_description}</td>
+                        <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200">{row.division?.name ?? "—"}</td>
+                        <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200">{row.item_code}</td>
+                        <td className="px-2 py-1 whitespace-normal break-words text-xs border-r text-gray-800 border-gray-200" title={row.item_description}>{row.item_description}</td>
                         <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.unit}</td>
                         <td className="px-2 py-1 whitespace-nowrap text-xs border-r text-gray-800 border-gray-200">{row.organization || 'RHD'}</td>
   {orgRegions.map((r) => (
@@ -2228,7 +2575,103 @@ export default function Products() {
           </div>
         </div>
       )}
-        </>
+      </>
+    )}
+
+      {isDeleteSelectedSpecialConfirmOpen && (
+        <div className="fixed inset-0 bg-black/20 flex justify-center items-center z-[60]">
+          <div className="bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-sm p-4">
+            <h3 className="text-sm font-semibold text-gray-900 mb-2">Delete Selected Special Items</h3>
+            <p className="text-xs text-gray-600 mb-4">Are you sure you want to delete this grouped item? This action cannot be undone.</p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setIsDeleteSelectedSpecialConfirmOpen(false)}
+                className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteSelectedSpecialGroup}
+                className="bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-3 rounded text-xs"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isEditModalOpen && editItem && (
+        <div className="fixed inset-0 bg-white/40 backdrop-blur-sm flex justify-center items-center z-50">
+          <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-2xl z-50 relative border border-gray-200">
+            <button onClick={() => setIsEditModalOpen(false)} className="absolute top-3 right-3 inline-flex items-center justify-center w-9 h-9 rounded-full bg-gray-100 text-gray-700 hover:bg-gray-200 hover:text-gray-900 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-900">Edit Item</h2>
+            <div className="grid grid-cols-2 gap-4 mt-2">
+              <select name="division_id" value={editItem.division_id} onChange={(e) => setEditItem({ ...editItem, division_id: e.target.value })} className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                <option value="">Division</option>
+                {divisions.map(d => <option key={d.division_id} value={d.division_id}>{d.name}</option>)}
+              </select>
+              <input name="item_code" value={editItem.item_code} onChange={(e) => setEditItem({ ...editItem, item_code: e.target.value })} placeholder="Code" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <input name="item_description" value={editItem.item_description} onChange={(e) => setEditItem({ ...editItem, item_description: e.target.value })} placeholder="Description" className="border border-gray-300 p-3 rounded-lg col-span-2 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <select name="unit" value={editItem.unit} onChange={(e) => {
+                if (e.target.value === "add_new_unit") {
+                  setIsAddingNewUnit(true);
+                } else {
+                  setEditItem({ ...editItem, unit: e.target.value });
+                  setIsAddingNewUnit(false);
+                }
+              }} className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500">
+                <option value="">Select Unit</option>
+                {uniqueUnits.map(unit => <option key={unit} value={unit}>{unit}</option>)}
+                <option value="add_new_unit">Add New Unit</option>
+              </select>
+              {isAddingNewUnit && (
+                <div className="col-span-2 flex items-center">
+                  <input
+                    type="text"
+                    value={newUnit}
+                    onChange={(e) => setNewUnit(e.target.value)}
+                    placeholder="New Unit"
+                    className="border border-gray-300 p-3 rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (newUnit && !uniqueUnits.includes(newUnit)) {
+                        setUniqueUnits([...uniqueUnits, newUnit]);
+                        setEditItem({ ...editItem, unit: newUnit });
+                        setNewUnit("");
+                        setIsAddingNewUnit(false);
+                      }
+                    }}
+                    className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-4 rounded-lg ml-2 transition-colors"
+                  >
+                    Add
+                  </button>
+                </div>
+              )}
+              <input name="rate" value={editItem.rate} onChange={(e) => setEditItem({ ...editItem, rate: e.target.value })} placeholder="Rate" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+              <input name="region" value={editItem.region} onChange={(e) => setEditItem({ ...editItem, region: e.target.value })} placeholder="Region" className="border border-gray-300 p-3 rounded-lg col-span-1 focus:outline-none focus:ring-2 focus:ring-teal-500" />
+            </div>
+            <div className="flex justify-end mt-6 gap-3">
+              <button
+                type="button"
+                onClick={() => setIsEditModalOpen(false)}
+                className="bg-white border border-teal-600 text-teal-700 hover:bg-teal-50 font-semibold py-1 px-3 rounded shadow-sm text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={updateItem}
+                className="bg-teal-700 hover:bg-teal-900 text-white font-medium py-1 px-3 rounded inline-flex items-center gap-1 text-xs"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

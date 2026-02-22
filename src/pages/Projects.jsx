@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { FaTrashAlt, FaPlus, FaEdit } from "react-icons/fa";
-import { listProjects, createProject, deleteProject } from "../api/projects";
+import { listProjects, createProject, deleteProject, updateProject } from "../api/projects";
 import { useAuth } from "../hooks/useAuth";
 
 export default function Projects() {
@@ -14,16 +14,48 @@ export default function Projects() {
   const [addProjectError, setAddProjectError] = useState("");
   const [isConfirmDeleteProjectOpen, setIsConfirmDeleteProjectOpen] = useState(false);
   const [projectPendingDelete, setProjectPendingDelete] = useState(null);
-  // Selection for possible single-row actions (no mass delete requested)
+  // Selection for single-row actions
   const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [selectedProjectIds, setSelectedProjectIds] = useState([]);
+  
+  const toggleSelectProject = (id) => {
+    setSelectedProjectIds(prev => prev.includes(id) ? [] : [id]);
+  };
+
+  const handleEditProject = () => {
+    if (selectedProjectIds.length !== 1) return;
+    const project = projects.find(p => p.project_id === selectedProjectIds[0]);
+    if (!project) return;
+    openEditProject(project);
+  };
+
+  const handleDeleteProject = () => {
+    if (selectedProjectIds.length !== 1) return;
+    const project = projects.find(p => p.project_id === selectedProjectIds[0]);
+    if (!project) return;
+    requestDeleteProject(project);
+  };
   const [isEditProjectModalOpen, setIsEditProjectModalOpen] = useState(false);
   const [editProjectForm, setEditProjectForm] = useState({ project_name: "", client_name: "" });
   const [editProjectError, setEditProjectError] = useState("");
 
   const formatDate = (value) => {
     if (!value) return "—";
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+    // Backend returns naive UTC string; append 'Z' to ensure it's treated as UTC
+    const dateStr = value.endsWith("Z") ? value : `${value}Z`;
+    const date = new Date(dateStr);
+    if (Number.isNaN(date.getTime())) return "—";
+    
+    // Format to BDT (Bangladesh Standard Time) with AM/PM
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Dhaka",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).format(date);
   };
 
   const formatUser = (user, userId) => {
@@ -132,7 +164,7 @@ export default function Projects() {
       return;
     }
     try {
-      await axios.patch(`${API}/projects/${selectedProjectId}`, editProjectForm);
+      await updateProject(selectedProjectId, editProjectForm);
       setIsEditProjectModalOpen(false);
       setSelectedProjectId(null);
       setEditProjectForm({ project_name: "", client_name: "" });
@@ -285,13 +317,13 @@ export default function Projects() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-100">
               <tr>
+                <th className="w-10 px-2 py-2 text-center border-r border-gray-200"></th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Project Name</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Client Name</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Project Created By</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Created At</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated By</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated At</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -300,8 +332,18 @@ export default function Projects() {
                   <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-600">No projects found</td>
                 </tr>
               ) : (
-                projects.map((p, i) => (
-                  <tr key={p.project_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
+                projects.map((p, i) => {
+                  const isSelected = selectedProjectIds.includes(p.project_id);
+                  return (
+                  <tr key={p.project_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors ${isSelected ? 'bg-teal-100' : ''}`}>
+                    <td className="px-2 py-2 text-center border-r border-gray-200">
+                      <input 
+                        type="checkbox" 
+                        checked={isSelected}
+                        onChange={() => toggleSelectProject(p.project_id)}
+                        className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                      />
+                    </td>
                     <td className="px-3 py-2 text-xs text-teal-700 font-medium whitespace-nowrap">
                       <Link to={`/projects/${p.project_id}/estimations`} className="hover:underline">
                         {p.project_name}
@@ -312,37 +354,43 @@ export default function Projects() {
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(p.created_at)}</td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatUser(p.updated_by, p.updated_by_id)}</td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(p.updated_at)}</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap text-right">
-                      <div className="inline-flex items-center gap-2">
-                        {(isAdmin || p.created_by_id === user?.user_id) && (
-                          <>
-                            <button
-                              type="button"
-                              className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
-                              onClick={() => openEditProject(p)}
-                              title="Edit Project"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              type="button"
-                              className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
-                              onClick={() => requestDeleteProject(p)}
-                              title="Delete Project"
-                            >
-                              Delete
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Selection Bar */}
+      {selectedProjectIds.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white px-6 py-3 flex items-center gap-6 z-50 shadow-lg animate-slide-up">
+          <div className="text-sm font-medium border-r border-gray-700 pr-6">
+            {selectedProjectIds.length} selected item(s)
+          </div>
+          <div className="flex items-center gap-3">
+            {(isAdmin || (selectedProjectIds.length === 1 && projects.find(p => p.project_id === selectedProjectIds[0])?.created_by_id === user?.user_id)) && (
+            <>
+            <button 
+              onClick={handleDeleteProject}
+              className={`flex items-center gap-2 px-3 py-1.5 hover:bg-gray-800 rounded border border-gray-700 text-red-400 text-sm ${selectedProjectIds.length !== 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
+              disabled={selectedProjectIds.length !== 1}
+            >
+              <FaTrashAlt className="w-3 h-3" /> Delete
+            </button>
+            <button 
+              onClick={handleEditProject}
+              className={`flex items-center gap-2 px-3 py-1.5 hover:bg-gray-800 rounded border border-gray-700 text-sm ${selectedProjectIds.length !== 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
+              disabled={selectedProjectIds.length !== 1}
+            >
+              <FaEdit className="w-3 h-3" /> Edit
+            </button>
+            </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

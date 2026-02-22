@@ -17,6 +17,7 @@ export default function ProjectEstimations() {
   const [regions, setRegions] = useState([]);
   const [selectedRegion, setSelectedRegion] = useState("");
   const [projectName, setProjectName] = useState("");
+  const [projectOwnerId, setProjectOwnerId] = useState(null);
   const [isCreateEstimationModalOpen, setIsCreateEstimationModalOpen] = useState(false);
   const [createError, setCreateError] = useState("");
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
@@ -25,12 +26,45 @@ export default function ProjectEstimations() {
   const [editEstimationId, setEditEstimationId] = useState(null);
   const [editName, setEditName] = useState("");
   const [editRegion, setEditRegion] = useState("");
-  const [editError, setEditError] = useState("");
+  // Selection for single-row actions
+  const [selectedEstimationId, setSelectedEstimationId] = useState(null);
+  const [selectedEstimationIds, setSelectedEstimationIds] = useState([]);
+  
+  const toggleSelectEstimation = (id) => {
+    setSelectedEstimationIds(prev => prev.includes(id) ? [] : [id]);
+  };
+
+  const handleEditEstimation = () => {
+    if (selectedEstimationIds.length !== 1) return;
+    const estimation = estimations.find(e => e.estimation_id === selectedEstimationIds[0]);
+    if (!estimation) return;
+    openEditEstimation(estimation);
+  };
+
+  const handleDeleteEstimation = () => {
+    if (selectedEstimationIds.length !== 1) return;
+    const estimation = estimations.find(e => e.estimation_id === selectedEstimationIds[0]);
+    if (!estimation) return;
+    openDeleteConfirm(estimation.estimation_id, estimation.estimation_name);
+  };
 
   const formatDate = (value) => {
     if (!value) return "—";
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+    // Backend returns naive UTC string; append 'Z' to ensure it's treated as UTC
+    const dateStr = value.endsWith("Z") ? value : `${value}Z`;
+    const date = new Date(dateStr);
+    if (Number.isNaN(date.getTime())) return "—";
+    
+    // Format to BDT (Bangladesh Standard Time) with AM/PM
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Dhaka",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).format(date);
   };
 
   const formatUser = (user, userId) => {
@@ -79,7 +113,10 @@ export default function ProjectEstimations() {
     try {
       const data = await listProjects();
       const proj = (data || []).find(p => String(p.project_id) === String(projectId));
-      if (proj) setProjectName(proj.project_name || "");
+      if (proj) {
+        setProjectName(proj.project_name || "");
+        setProjectOwnerId(proj.created_by_id);
+      }
     } catch (e) {
       console.error('Failed to load project name', e);
     }
@@ -218,6 +255,7 @@ export default function ProjectEstimations() {
     <div className="relative bg-white p-4 sm:p-6 -mx-6 -mb-6 w-[calc(100%+3rem)]">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-xl font-semibold">Estimations for Project : {projectName || `#${projectId}`}</h2>
+        {(isAdmin || projectOwnerId === user?.user_id) && (
         <button
           onClick={() => { setIsCreateEstimationModalOpen(true); setCreateError(""); setSelectedRegion(""); }}
           className="bg-teal-600 hover:bg-teal-700 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1"
@@ -225,6 +263,7 @@ export default function ProjectEstimations() {
           <FaPlus className="w-3 h-3" />
           <span>Create Estimation</span>
         </button>
+        )}
       </div>
 
       {isCreateEstimationModalOpen && (
@@ -366,13 +405,13 @@ export default function ProjectEstimations() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-100">
               <tr>
+                <th className="w-10 px-2 py-2 text-center border-r border-gray-200"></th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Estimation Name</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Region</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Created By</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Created At</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated By</th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-700 whitespace-nowrap">Updated At</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-gray-700 whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -381,8 +420,18 @@ export default function ProjectEstimations() {
                   <td colSpan={7} className="px-3 py-6 text-center text-sm text-gray-600">No estimations found</td>
                 </tr>
               ) : (
-                estimations.map((es, i) => (
-                  <tr key={es.estimation_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors`}>
+                estimations.map((es, i) => {
+                  const isSelected = selectedEstimationIds.includes(es.estimation_id);
+                  return (
+                  <tr key={es.estimation_id} className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-teal-50 transition-colors ${isSelected ? 'bg-teal-100' : ''}`}>
+                    <td className="px-2 py-2 text-center border-r border-gray-200">
+                      <input 
+                        type="checkbox" 
+                        checked={isSelected}
+                        onChange={() => toggleSelectEstimation(es.estimation_id)}
+                        className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                      />
+                    </td>
                     <td className="px-3 py-2 text-xs text-teal-700 font-medium whitespace-nowrap">
                       <Link
                         to={`/estimations/${es.estimation_id}?region=${encodeURIComponent(localStorage.getItem(`estimationRegion:${es.estimation_id}`) || '')}`}
@@ -396,44 +445,43 @@ export default function ProjectEstimations() {
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(es.created_at)}</td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatUser(es.updated_by, es.updated_by_id)}</td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap">{formatDate(es.updated_at)}</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap text-right">
-                      <div className="inline-flex items-center gap-2">
-                        <Link
-                          to={`/estimations/${es.estimation_id}`}
-                          className="text-indigo-600 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 px-3 py-1 rounded transition-colors"
-                          title="View Details"
-                        >
-                          View
-                        </Link>
-                        {(isAdmin || es.created_by_id === user?.user_id) && (
-                          <>
-                            <button
-                              type="button"
-                              className="text-blue-600 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded transition-colors"
-                              onClick={() => openEditEstimation(es)}
-                              title="Edit Estimation"
-                            >
-                              <FaEdit />
-                            </button>
-                            <button
-                              type="button"
-                              className="text-red-600 hover:text-red-900 bg-red-50 hover:bg-red-100 px-3 py-1 rounded transition-colors"
-                              onClick={() => openDeleteConfirm(es.estimation_id, es.estimation_name)}
-                              title="Delete Estimation"
-                            >
-                              <FaTrash />
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Selection Bar */}
+      {selectedEstimationIds.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 bg-gray-900 text-white px-6 py-3 flex items-center gap-6 z-50 shadow-lg animate-slide-up">
+          <div className="text-sm font-medium border-r border-gray-700 pr-6">
+            {selectedEstimationIds.length} selected item(s)
+          </div>
+          <div className="flex items-center gap-3">
+            {(isAdmin || (selectedEstimationIds.length === 1 && estimations.find(e => e.estimation_id === selectedEstimationIds[0])?.created_by_id === user?.user_id)) && (
+            <>
+            <button 
+              onClick={handleDeleteEstimation}
+              className={`flex items-center gap-2 px-3 py-1.5 hover:bg-gray-800 rounded border border-gray-700 text-red-400 text-sm ${selectedEstimationIds.length !== 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
+              disabled={selectedEstimationIds.length !== 1}
+            >
+              <FaTrash className="w-3 h-3" /> Delete
+            </button>
+            <button 
+              onClick={handleEditEstimation}
+              className={`flex items-center gap-2 px-3 py-1.5 hover:bg-gray-800 rounded border border-gray-700 text-sm ${selectedEstimationIds.length !== 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
+              disabled={selectedEstimationIds.length !== 1}
+            >
+              <FaEdit className="w-3 h-3" /> Edit
+            </button>
+            </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -67,3 +67,13 @@ export const rejectSpecialItemRequest = async (requestId, reason) => {
   const res = await apiClient.post(`/estimations/special-item-requests/${requestId}/reject`, { reason });
   return res.data;
 };
+
+export const updateSpecialItemRequest = async (requestId, data) => {
+  const res = await apiClient.put(`/estimations/special-item-requests/${requestId}`, data);
+  return res.data;
+};
+
+export const deleteSpecialItemRequest = async (requestId) => {
+  const res = await apiClient.delete(`/estimations/special-item-requests/${requestId}`);
+  return res.data;
+};
