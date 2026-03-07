@@ -18,10 +18,25 @@ export const createItem = async (payload) => {
 export const importItems = async (file, mode = "append", onUploadProgress) => {
   const form = new FormData();
   form.append("file", file);
-  const res = await apiClient.post(`/items/import`, form, {
-    params: { mode },
-    headers: {}, // Let axios automatically set Content-Type with proper boundary
-    onUploadProgress: onUploadProgress,
-  });
-  return res.data;
+  try {
+    const res = await apiClient.post(`/items/import`, form, {
+      params: { mode },
+      headers: {}, // Let axios automatically set Content-Type with proper boundary
+      onUploadProgress: onUploadProgress,
+      timeout: 300000, // 5 minute timeout for large file processing
+    });
+    return res.data;
+  } catch (error) {
+    console.error(
+      "[API] importItems error:",
+      error.message,
+      error.response?.status,
+    );
+    if (error.code === "ECONNABORTED") {
+      throw new Error(
+        "Import request timed out. The file might be too large or the server is taking too long to process.",
+      );
+    }
+    throw error;
+  }
 };
