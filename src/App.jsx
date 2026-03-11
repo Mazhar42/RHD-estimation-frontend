@@ -87,8 +87,8 @@ function AppContent() {
         path="/*"
         element={
           <ProtectedRoute>
-            <div className="flex flex-col min-h-screen">
-              <header className="bg-teal-900 px-4 py-2 flex items-center justify-between">
+            <div className="flex flex-col h-screen overflow-hidden">
+              <header className="bg-teal-900 px-4 py-2 flex items-center justify-between flex-shrink-0">
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setIsLauncherOpen(true)}
@@ -203,7 +203,7 @@ function AppContent() {
                   </div>
                 </nav>
               </header>
-              <div className="p-6">
+              <div className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50 p-6">
                 <Routes>
                   <Route path="/" element={<Products />} />
                   <Route

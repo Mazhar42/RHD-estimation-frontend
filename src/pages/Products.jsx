@@ -1208,7 +1208,6 @@ export default function Products() {
   // Make table fill viewport and scroll internally
   const tableScrollRef = useRef(null);
   const bottomPaginationRef = useRef(null);
-  const [tableScrollHeight, setTableScrollHeight] = useState(null);
   const [columnWidths, setColumnWidths] = useState(() => {
     try {
       const saved = localStorage.getItem("productsColumnWidths");
@@ -1593,23 +1592,6 @@ export default function Products() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isConfirmDeleteGroupOpen, selectedGroupKey]);
 
-  useEffect(() => {
-    const computeHeight = () => {
-      const sc = tableScrollRef.current;
-      if (!sc) return;
-      const rect = sc.getBoundingClientRect();
-      const bottomH = bottomPaginationRef.current
-        ? bottomPaginationRef.current.getBoundingClientRect().height
-        : 0;
-      const padding = 16; // small breathing space
-      const available = window.innerHeight - rect.top - bottomH - padding;
-      setTableScrollHeight(Math.max(240, available));
-    };
-    computeHeight();
-    window.addEventListener("resize", computeHeight);
-    return () => window.removeEventListener("resize", computeHeight);
-  }, []);
-
   const groupedSpecialRows = React.useMemo(() => {
     const groupedMap = new Map();
     for (const it of specialItems) {
@@ -1713,7 +1695,7 @@ export default function Products() {
   };
 
   return (
-    <div className="item-master-font relative bg-white p-4 sm:p-6 -mx-6 -mb-6 w-[calc(100%+3rem)]">
+    <div className="item-master-font relative bg-white p-4 sm:p-6 -m-6 w-[calc(100%+3rem)] h-[calc(100%+3rem)] flex flex-col overflow-hidden">
       {toast && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-white text-emerald-700 border border-emerald-300 shadow px-4 py-2 rounded text-sm font-medium">
           {toast}
@@ -1747,7 +1729,7 @@ export default function Products() {
       </div>
 
       {activeTab === "special" && (
-        <div className="mb-6 bg-white rounded-lg">
+        <div className="flex-1 bg-white rounded-lg flex flex-col min-h-0 overflow-hidden">
           {specialItemsLoading && (
             <div className="text-sm text-gray-600">
               Loading special items...
@@ -1758,16 +1740,9 @@ export default function Products() {
           )}
           {!specialItemsLoading && !specialItemsError && (
             <>
-              <div className="border rounded-lg flex flex-col border-gray-200">
-                <div className="overflow-x-auto w-full">
-                  <div
-                    style={{
-                      height: tableScrollHeight
-                        ? `${tableScrollHeight}px`
-                        : undefined,
-                    }}
-                    className="overflow-auto"
-                  >
+              <div className="flex-1 border rounded-lg flex flex-col border-gray-200 min-h-0 overflow-hidden">
+                <div className="flex-1 w-full overflow-hidden flex flex-col">
+                  <div className="flex-1 overflow-auto">
                     <table className="min-w-full border-collapse table-fixed">
                       <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
                         <tr>
@@ -2091,7 +2066,7 @@ export default function Products() {
       )}
 
       {activeTab === "items" && (
-        <>
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold">Item Master</h2>
             <div className="flex gap-2 items-center">
@@ -3399,16 +3374,11 @@ export default function Products() {
             </div>
           )}
 
-          <div className="border rounded-lg flex flex-col border-gray-200">
-            <div className="overflow-x-auto w-full">
+          <div className="flex-1 border rounded-lg flex flex-col border-gray-200 min-h-0 overflow-hidden">
+            <div className="flex-1 w-full overflow-hidden flex flex-col">
               <div
                 ref={tableScrollRef}
-                style={{
-                  height: tableScrollHeight
-                    ? `${tableScrollHeight}px`
-                    : undefined,
-                }}
-                className="overflow-auto"
+                className="flex-1 overflow-auto"
               >
                 <table className="min-w-full border-collapse table-fixed">
                   <thead className="sticky top-0 z-10 bg-gray-100 border-b-2 border-gray-200">
@@ -3628,54 +3598,54 @@ export default function Products() {
                     )}
                   </tbody>
                 </table>
-                {selectedGroupKey && (
-                  <div className="sticky bottom-0 z-20 bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between">
-                    <div className="text-xs">1 grouped item selected</div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
-                        onClick={() => beginEditSelectedGroup()}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded"
-                        onClick={() => handleDuplicateSelectedGroup()}
-                      >
-                        Duplicate
-                      </button>
-                      <button
-                        className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
-                        onClick={() => requestDeleteSelectedGroup()}
-                      >
-                        Delete
-                      </button>
-                      <button
-                        className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded"
-                        onClick={clearSelection}
-                      >
-                        Clear selection
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {!selectedGroupKey && isSearchActive() && (
-                  <div className="sticky bottom-0 z-20 bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between">
-                    <div className="text-xs">Filters applied</div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded"
-                        onClick={clearAllSearch}
-                      >
-                        Clear all
-                      </button>
-                    </div>
-                  </div>
-                )}
                 {/* Bottom spacer to create a little space with header-like gray */}
                 <div className="sticky bottom-0 h-4 bg-gray-100 border-t border-gray-200" />
               </div>
             </div>
+            {selectedGroupKey && (
+              <div className="bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between rounded-b-lg">
+                <div className="text-xs">1 grouped item selected</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="bg-teal-600 hover:bg-teal-700 text-white text-xs px-3 py-1 rounded"
+                    onClick={() => beginEditSelectedGroup()}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1 rounded"
+                    onClick={() => handleDuplicateSelectedGroup()}
+                  >
+                    Duplicate
+                  </button>
+                  <button
+                    className="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded"
+                    onClick={() => requestDeleteSelectedGroup()}
+                  >
+                    Delete
+                  </button>
+                  <button
+                    className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded"
+                    onClick={clearSelection}
+                  >
+                    Clear selection
+                  </button>
+                </div>
+              </div>
+            )}
+            {!selectedGroupKey && isSearchActive() && (
+              <div className="bg-gray-800 text-white px-3 py-2 border-t border-gray-700 flex items-center justify-between rounded-b-lg">
+                <div className="text-xs">Filters applied</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="bg-gray-600 hover:bg-gray-500 text-white text-xs px-3 py-1 rounded"
+                    onClick={clearAllSearch}
+                  >
+                    Clear all
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           <div
             ref={bottomPaginationRef}
@@ -4204,7 +4174,7 @@ export default function Products() {
               </div>
             </div>
           )}
-        </>
+        </div>
       )}
 
       {isDeleteSelectedSpecialConfirmOpen && (

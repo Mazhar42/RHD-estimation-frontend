@@ -26,8 +26,6 @@ import {
   createSpecialItemRequest,
   updateSpecialItemRequest,
   deleteSpecialItemRequest,
-  getRateMismatchLog,
-  downloadRateMismatchLogCsv,
 } from "../api/estimations";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
@@ -130,10 +128,6 @@ export default function EstimationDetail() {
   const [region, setRegion] = useState("");
   const [availableRegions, setAvailableRegions] = useState([]);
   const [isDownloadMenuOpen, setIsDownloadMenuOpen] = useState(false);
-  const [isRateMismatchOpen, setIsRateMismatchOpen] = useState(false);
-  const [rateMismatchItems, setRateMismatchItems] = useState([]);
-  const [rateMismatchLoading, setRateMismatchLoading] = useState(false);
-  const [rateMismatchError, setRateMismatchError] = useState("");
   const ITEMS_PAGE_SIZE = 1000;
   const formatAmount = (n) =>
     new Intl.NumberFormat("en-US", {
@@ -1327,46 +1321,6 @@ export default function EstimationDetail() {
     XLSX.writeFile(wb, `estimation_${estimationId}.xlsx`);
   };
 
-  const fetchRateMismatchLog = async () => {
-    try {
-      setRateMismatchLoading(true);
-      setRateMismatchError("");
-      const res = await getRateMismatchLog(estimationId);
-      setRateMismatchItems(res?.items || []);
-    } catch (e) {
-      const msg =
-        e?.response?.data?.detail || "Failed to load rate mismatch log";
-      setRateMismatchError(msg);
-      setRateMismatchItems([]);
-    } finally {
-      setRateMismatchLoading(false);
-    }
-  };
-
-  const toggleRateMismatch = async () => {
-    const next = !isRateMismatchOpen;
-    setIsRateMismatchOpen(next);
-    if (next) {
-      await fetchRateMismatchLog();
-    }
-  };
-
-  const downloadRateMismatchCsv = async () => {
-    try {
-      const blob = await downloadRateMismatchLogCsv(estimationId);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `estimation_${estimationId}_rate_mismatch_log.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      const msg =
-        e?.response?.data?.detail || "Failed to download mismatch CSV";
-      setRateMismatchError(msg);
-    }
-  };
-
   const downloadCsv = () => {
     // Calculate total including pending special items
     const pendingSpecialAmount = specialRequests
@@ -2063,21 +2017,14 @@ export default function EstimationDetail() {
                     </span>
                   )}
                   <button
-                    onClick={() => setIsAddLineModalOpen(true)}
-                    className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1"
-                  >
-                    <FaPlus className="w-3 h-3" />
-                    <span>Add Line</span>
-                  </button>
-                </>
-              )}
-              <button
-                onClick={toggleRateMismatch}
-                className="bg-white border border-amber-600 text-amber-700 hover:bg-amber-50 text-xs font-medium py-1 px-3 rounded inline-flex items-center gap-1"
+                onClick={() => setIsAddLineModalOpen(true)}
+                className="bg-teal-700 hover:bg-teal-900 text-white text-xs font-extralight py-1 px-4 rounded inline-flex items-center gap-1"
               >
-                <FaExclamationTriangle className="w-3 h-3" />
-                <span>Rate Mismatch</span>
+                <FaPlus className="w-3 h-3" />
+                <span>Add Line</span>
               </button>
+            </>
+          )}
               <div className="relative" ref={downloadMenuRef}>
                 <button
                   onClick={() => setIsDownloadMenuOpen((v) => !v)}
@@ -2245,129 +2192,6 @@ export default function EstimationDetail() {
           )}
         </div>
       </div>
-      {isRateMismatchOpen && (
-        <div className="mb-4 border border-amber-200 rounded-lg bg-amber-50 p-4">
-          <div className="flex items-center justify-between gap-2 mb-3">
-            <div className="text-sm font-semibold text-amber-900">
-              Rate Mismatch Log
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={fetchRateMismatchLog}
-                disabled={rateMismatchLoading}
-                className={`text-xs px-3 py-1 rounded border ${rateMismatchLoading ? "bg-amber-100 text-amber-400 border-amber-200" : "bg-white text-amber-700 border-amber-600 hover:bg-amber-100"}`}
-              >
-                {rateMismatchLoading ? "Refreshing..." : "Refresh"}
-              </button>
-              <button
-                type="button"
-                onClick={downloadRateMismatchCsv}
-                disabled={rateMismatchLoading}
-                className={`text-xs px-3 py-1 rounded border ${rateMismatchLoading ? "bg-amber-100 text-amber-400 border-amber-200" : "bg-white text-amber-700 border-amber-600 hover:bg-amber-100"}`}
-              >
-                Download CSV
-              </button>
-            </div>
-          </div>
-          {rateMismatchError && (
-            <div className="text-xs text-red-700 mb-2">{rateMismatchError}</div>
-          )}
-          <div className="overflow-auto max-h-[40vh] border border-amber-100 rounded bg-white">
-            <table className="min-w-full text-xs">
-              <thead className="bg-amber-100 text-amber-900">
-                <tr>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Line ID
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Item Code
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Division
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Organization
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Region
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Line Rate
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Item Rate
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Alt Region
-                  </th>
-                  <th className="px-2 py-2 text-left border-r border-amber-200">
-                    Alt Rate
-                  </th>
-                  <th className="px-2 py-2 text-left">Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rateMismatchLoading ? (
-                  <tr>
-                    <td
-                      colSpan={10}
-                      className="px-3 py-4 text-center text-amber-700"
-                    >
-                      Loading...
-                    </td>
-                  </tr>
-                ) : rateMismatchItems.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={10}
-                      className="px-3 py-4 text-center text-gray-600"
-                    >
-                      No mismatches found.
-                    </td>
-                  </tr>
-                ) : (
-                  rateMismatchItems.map((row) => (
-                    <tr
-                      key={row.line_id || `${row.item_code}-${row.region}`}
-                      className="odd:bg-white even:bg-amber-50"
-                    >
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.line_id ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.item_code ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.division ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.organization ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.region ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.line_rate ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.item_rate ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.alt_region ?? "—"}
-                      </td>
-                      <td className="px-2 py-2 border-r border-amber-100">
-                        {row.alt_rate ?? "—"}
-                      </td>
-                      <td className="px-2 py-2">{row.reason ?? "—"}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
       {/* Tabs */}
       <div className="flex border-b border-gray-200 mb-4">
         <button
@@ -2824,7 +2648,7 @@ export default function EstimationDetail() {
                                           setInlineEditingCell(null)
                                         }
                                         onKeyDown={handleInlineKeyDown}
-                                        className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                        className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         onClick={(e) => e.stopPropagation()}
                                       >
                                         {(
@@ -2865,7 +2689,7 @@ export default function EstimationDetail() {
                                           setInlineEditingCell(null)
                                         }
                                         onKeyDown={handleInlineKeyDown}
-                                        className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                        className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         onClick={(e) => e.stopPropagation()}
                                       >
                                         {(
@@ -2911,7 +2735,7 @@ export default function EstimationDetail() {
                                             setInlineEditingCell(null)
                                           }
                                           onKeyDown={handleInlineKeyDown}
-                                          className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                          className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         />
                                       ) : (
                                         l.sub_description
@@ -2939,7 +2763,7 @@ export default function EstimationDetail() {
                                           setInlineEditingCell(null)
                                         }
                                         onKeyDown={handleInlineKeyDown}
-                                        className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                        className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                       />
                                     ) : (
                                       renderDimensionCell(l, "no_of_units")
@@ -2967,7 +2791,7 @@ export default function EstimationDetail() {
                                             setInlineEditingCell(null)
                                           }
                                           onKeyDown={handleInlineKeyDown}
-                                          className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                          className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         />
                                       ) : (
                                         renderDimensionCell(l, "length")
@@ -2996,7 +2820,7 @@ export default function EstimationDetail() {
                                             setInlineEditingCell(null)
                                           }
                                           onKeyDown={handleInlineKeyDown}
-                                          className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                          className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         />
                                       ) : (
                                         renderDimensionCell(l, "width")
@@ -3026,7 +2850,7 @@ export default function EstimationDetail() {
                                             setInlineEditingCell(null)
                                           }
                                           onKeyDown={handleInlineKeyDown}
-                                          className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                          className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         />
                                       ) : (
                                         renderDimensionCell(l, "thickness")
@@ -3068,7 +2892,7 @@ export default function EstimationDetail() {
                                             setInlineEditingCell(null)
                                           }
                                           onKeyDown={handleInlineKeyDown}
-                                          className="w-full text-xs border border-teal-500 rounded px-1 py-0.5"
+                                          className="w-full text-xs border border-teal-500 rounded px-2 py-1 focus:ring-2 focus:ring-teal-200 focus:outline-none transition-shadow shadow-sm"
                                         />
                                       ) : (
                                         (l.calculated_qty ?? l.quantity)
