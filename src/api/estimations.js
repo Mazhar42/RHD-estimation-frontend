@@ -10,6 +10,11 @@ export const createEstimationLine = async (estimationId, data) => {
   return res.data;
 };
 
+export const createEstimationLinesBatch = async (estimationId, lines) => {
+  const res = await apiClient.post(`/estimations/${estimationId}/lines/batch`, { lines });
+  return res.data;
+};
+
 export const updateEstimationLine = async (lineId, data) => {
   const res = await apiClient.put(`/estimations/lines/${lineId}`, data);
   return res.data;
