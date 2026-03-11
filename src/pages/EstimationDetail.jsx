@@ -675,6 +675,8 @@ export default function EstimationDetail() {
       });
       const totalRows = candidateRows.length || 1;
       let lastItem = null;
+      const BATCH_SIZE = 50;
+      let batch = [];
       for (let ri = startIdx; ri < rows.length; ri++) {
         const row = rows[ri];
         if (!row || row.length === 0) continue;
@@ -783,16 +785,32 @@ export default function EstimationDetail() {
           quantity: parseNum(quantityCell),
         };
 
-        try {
-          await createEstimationLine(estimationId, payload);
-          importedCount++;
-        } catch (e) {
-          console.error("Failed to import row", e);
-          skippedCount++;
-          apiErrorCount++;
+        batch.push(payload);
+
+        if (batch.length >= BATCH_SIZE) {
+          try {
+            await createEstimationLinesBatch(estimationId, batch);
+            importedCount += batch.length;
+          } catch (e) {
+            console.error("Failed to import batch", e);
+            apiErrorCount += batch.length;
+          }
+          batch = [];
         }
+
         processedRows++;
         setImportProgress(Math.round((processedRows / totalRows) * 100));
+      }
+
+      // Process remaining batch
+      if (batch.length > 0) {
+        try {
+            await createEstimationLinesBatch(estimationId, batch);
+            importedCount += batch.length;
+        } catch (e) {
+            console.error("Failed to import final batch", e);
+            apiErrorCount += batch.length;
+        }
       }
 
       await fetchLines();
