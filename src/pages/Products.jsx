@@ -510,8 +510,8 @@ export default function Products() {
       if (orgName) params.organization = orgName;
       if (filters.division)
         params.division_id = parseInt(filters.division, 10) || undefined;
-      if (filters.code) params.search = filters.code; // API searches code and description
-      if (filters.description) params.search = filters.description;
+      if (filters.code) params.item_code = filters.code;
+      if (filters.description) params.item_description = filters.description;
       if (filters.unit) params.unit = filters.unit;
       if (filters.region) params.region = filters.region;
       if (filters.rate) {
@@ -575,8 +575,8 @@ export default function Products() {
       if (orgName) params.organization = orgName;
       if (filters.division)
         params.division_id = parseInt(filters.division, 10) || undefined;
-      if (filters.code) params.search = filters.code;
-      if (filters.description) params.search = filters.description;
+      if (filters.code) params.item_code = filters.code;
+      if (filters.description) params.item_description = filters.description;
       if (filters.unit) params.unit = filters.unit;
       if (filters.region) params.region = filters.region;
 
@@ -1845,9 +1845,7 @@ export default function Products() {
                             <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>
                           )}
                           <th className="px-2 py-1 border-r border-gray-200">
-                            <input
-                              type="text"
-                              placeholder="Search..."
+                            <select
                               value={specialSearch.division}
                               onChange={(e) =>
                                 setSpecialSearch({
@@ -1855,8 +1853,27 @@ export default function Products() {
                                   division: e.target.value,
                                 })
                               }
-                              className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
-                            />
+                              className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
+                            >
+                              <option value="">All Divisions</option>
+                              {divisions
+                                .filter((d) => {
+                                  if (!selectedOrg) return true;
+                                  return (
+                                    d.organization_id === selectedOrg.org_id ||
+                                    (d.organization_id == null &&
+                                      selectedOrg.name === "RHD")
+                                  );
+                                })
+                                .map((d) => (
+                                  <option
+                                    key={d.division_id}
+                                    value={d.division_id}
+                                  >
+                                    {d.name}
+                                  </option>
+                                ))}
+                            </select>
                           </th>
                           <th className="px-2 py-1 border-r border-gray-200">
                             <input
@@ -1900,20 +1917,7 @@ export default function Products() {
                               className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
                             />
                           </th>
-                          <th className="px-2 py-1 border-r min-w-[140px] border-gray-200">
-                            <input
-                              type="text"
-                              placeholder="Search..."
-                              value={specialSearch.organization}
-                              onChange={(e) =>
-                                setSpecialSearch({
-                                  ...specialSearch,
-                                  organization: e.target.value,
-                                })
-                              }
-                              className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
-                            />
-                          </th>
+                          <th className="px-2 py-1 border-r min-w-[140px] border-gray-200"></th>
                           {orgRegions.map((r) => (
                             <th
                               key={r}
@@ -3477,15 +3481,29 @@ export default function Products() {
                         <th className="px-2 py-1 border-r min-w-[40px] border-gray-200"></th>
                       )}
                       <th className="px-2 py-1 border-r border-gray-200">
-                        <input
-                          type="text"
-                          placeholder="Search..."
+                        <select
                           value={search.division}
                           onChange={(e) =>
                             setSearch({ ...search, division: e.target.value })
                           }
-                          className="w-full min-w-0 text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
-                        />
+                          className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
+                        >
+                          <option value="">All Divisions</option>
+                          {divisions
+                            .filter((d) => {
+                              if (!selectedOrg) return true;
+                              return (
+                                d.organization_id === selectedOrg.org_id ||
+                                (d.organization_id == null &&
+                                  selectedOrg.name === "RHD")
+                              );
+                            })
+                            .map((d) => (
+                              <option key={d.division_id} value={d.division_id}>
+                                {d.name}
+                              </option>
+                            ))}
+                        </select>
                       </th>
                       <th className="px-2 py-1 border-r border-gray-200">
                         <input
@@ -3528,20 +3546,7 @@ export default function Products() {
                           ))}
                         </select>
                       </th>
-                      <th className="px-2 py-1 border-r min-w-[140px] border-gray-200">
-                        <input
-                          type="text"
-                          placeholder="Search..."
-                          value={search.organization}
-                          onChange={(e) =>
-                            setSearch({
-                              ...search,
-                              organization: e.target.value,
-                            })
-                          }
-                          className="w-full text-xs px-2 py-1 border rounded-md transition-colors bg-white text-gray-900 border-gray-300 placeholder-gray-500 focus:border-teal-500 focus:ring-1 focus:ring-teal-200"
-                        />
-                      </th>
+                      <th className="px-2 py-1 border-r min-w-[140px] border-gray-200"></th>
                       {orgRegions.map((r) => (
                         <th
                           key={r}

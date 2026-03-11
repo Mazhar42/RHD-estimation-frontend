@@ -5,9 +5,33 @@ export const listDivisions = async () => {
   return res.data;
 };
 
-export const listItems = async (params = {}) => {
-  const res = await apiClient.get(`/items`, { params });
+export const listItems = async (params = {}, config = {}) => {
+  const res = await apiClient.get(`/items`, { params, ...config });
   return res.data;
+};
+
+export const listAllItems = async (params = {}, options = {}) => {
+  const {
+    pageSize = 1000,
+    timeout = 120000,
+    maxPages = 0,
+  } = options;
+  let skip = 0;
+  let page = 0;
+  const all = [];
+  while (true) {
+    const res = await listItems(
+      { ...params, skip, limit: pageSize },
+      { timeout },
+    );
+    const batch = res || [];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    skip += pageSize;
+    page += 1;
+    if (maxPages && page >= maxPages) break;
+  }
+  return all;
 };
 
 export const createItem = async (payload) => {

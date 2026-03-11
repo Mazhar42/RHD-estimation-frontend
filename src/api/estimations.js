@@ -77,3 +77,16 @@ export const deleteSpecialItemRequest = async (requestId) => {
   const res = await apiClient.delete(`/estimations/special-item-requests/${requestId}`);
   return res.data;
 };
+
+export const getRateMismatchLog = async (estimationId) => {
+  const res = await apiClient.get(`/estimations/${estimationId}/rate-mismatch-log`);
+  return res.data;
+};
+
+export const downloadRateMismatchLogCsv = async (estimationId) => {
+  const res = await apiClient.get(
+    `/estimations/${estimationId}/rate-mismatch-log.csv`,
+    { responseType: "blob" },
+  );
+  return res.data;
+};

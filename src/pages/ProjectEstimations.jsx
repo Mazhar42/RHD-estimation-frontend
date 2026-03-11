@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { listOrganizations, listRegions } from "../api/orgs";
-import { listItems } from "../api/items";
+import { listAllItems } from "../api/items";
 import { listProjects, listEstimations, createEstimation } from "../api/projects";
 import { deleteEstimation, updateEstimation } from "../api/estimations";
 import { useParams, Link, useNavigate } from "react-router-dom";
@@ -101,7 +101,7 @@ export default function ProjectEstimations() {
         return;
       }
       // Fallback: derive regions from items but restrict to organization=RHD
-      const items = await listItems({ limit: 1000000, organization: 'RHD' });
+      const items = await listAllItems({ organization: 'RHD' });
       const unique = Array.from(new Set((items || []).map(it => it.region))).filter(Boolean).sort();
       setRegions(unique);
     } catch (e) {
