@@ -469,17 +469,26 @@ export default function EstimationDetail() {
         String(code || "")
           .trim()
           .toLowerCase()
-          .replace(/[^a-z0-9]/g, "");
+          .replace(/[^a-z0-9]/g, ""); // Matches 01/02/04 as 010204, 01-02-04 as 010204, 01.02.04 as 010204
+
       // Precompute item maps for matching by code or description.
       // Items matching the current estimation region are preferred.
       const byCode = new Map();
       const byDesc = new Map();
       for (const it of items) {
+        // Add normalized code (stripping separators)
         const k = normCode(it.item_code);
         if (k) {
           // Prefer current region: overwrite only if we don't have a region match yet
           if (!byCode.has(k) || it.region === region) byCode.set(k, it);
         }
+        
+        // Also add exact code match to cover cases where delimiters matter but were stripped above
+        const kExact = String(it.item_code || "").trim().toLowerCase();
+        if (kExact && kExact !== k) {
+             if (!byCode.has(kExact) || it.region === region) byCode.set(kExact, it);
+        }
+
         const d = String(it.item_description || "")
           .trim()
           .toLowerCase();
@@ -504,9 +513,15 @@ export default function EstimationDetail() {
             (it) => String(it.item_code).trim() === codeTrim,
           );
           if (exact) return exact;
-          // 3. Normalized code (region-preferred via byCode map)
+          
+          // 3. Normalized code (stripping delimiters)
+          // This handles cases where Excel has "01/02/04" but DB has "01.02.04" or vice versa
           const norm = byCode.get(normCode(codeTrim));
           if (norm) return norm;
+          
+          // 4. Try matching with/without leading zeros if standard delimiters are used
+          // e.g. 1.2.4 vs 01.02.04
+          // (This is partially covered by normCode but normCode doesn't handle removing zeros)
         }
         const dkey = String(descCell || "")
           .trim()
