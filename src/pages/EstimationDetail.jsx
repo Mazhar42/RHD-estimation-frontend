@@ -27,6 +27,7 @@ import {
   updateSpecialItemRequest,
   deleteSpecialItemRequest,
   createEstimationLinesBatch,
+  createSpecialItemRequestsBatch,
 } from "../api/estimations";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
@@ -473,6 +474,17 @@ export default function EstimationDetail() {
 
       // Precompute item maps for matching by code or description.
       // Items matching the current estimation region are preferred.
+      
+      // Fetch available divisions for fallback
+      let divisionsList = [];
+      try {
+        divisionsList = await listDivisions({ skip: 0, limit: 1000 });
+      } catch (e) {
+        console.error("Failed to fetch divisions for import fallback", e);
+      }
+      // Use first division as default if no other info available
+      const defaultDivisionId = divisionsList.length > 0 ? divisionsList[0].division_id : 1;
+
       const byCode = new Map();
       const byDesc = new Map();
       for (const it of items) {
@@ -692,6 +704,8 @@ export default function EstimationDetail() {
       let lastItem = null;
       const BATCH_SIZE = 50;
       let batch = [];
+      let specialBatch = [];
+      
       for (let ri = startIdx; ri < rows.length; ri++) {
         const row = rows[ri];
         if (!row || row.length === 0) continue;
@@ -774,10 +788,53 @@ export default function EstimationDetail() {
 
         if (!item) {
           if (codeTrimmed) notFoundCodes.add(codeTrimmed);
-          skippedCount++;
-          missingItemCount++;
+          
+          // Instead of skipping, create a Special Item Request
+          const lengthRes = parseDimensionInput(lengthCell);
+          const widthRes = parseDimensionInput(widthCell);
+          const thicknessRes = parseDimensionInput(thicknessCell);
+          const noUnitsRes = parseDimensionInput(noUnitsCell);
+          
+          // Use last item's division if available, else default
+          const divId = lastItem?.division_id || defaultDivisionId;
+          
+          const specialPayload = {
+             division_id: divId,
+             item_description: String(descCell || codeCell || "Imported Item").trim(),
+             item_code: codeTrimmed || null,
+             sub_description: String(subDescCell || ""),
+             no_of_units: noUnitsRes.value ?? 1,
+             no_of_units_expr: noUnitsRes.expr,
+             length: lengthRes.value,
+             width: widthRes.value,
+             thickness: thicknessRes.value,
+             length_expr: lengthRes.expr,
+             width_expr: widthRes.expr,
+             thickness_expr: thicknessRes.expr,
+             quantity: parseNum(quantityCell),
+             unit: null, // Unknown unit
+             rate: 0, // Unknown rate
+             region: region || "Default",
+             organization: "RHD"
+          };
+          
+          specialBatch.push(specialPayload);
+          
+          // missingItemCount++; // Technically found/handled now? Let's not count as missing for error banner
+          // skippedCount++;
           processedRows++;
           setImportProgress(Math.round((processedRows / totalRows) * 100));
+          
+          if (specialBatch.length >= BATCH_SIZE) {
+            try {
+              await createSpecialItemRequestsBatch(estimationId, specialBatch);
+              importedCount += specialBatch.length;
+            } catch (e) {
+              console.error("Failed to import special batch", e);
+              apiErrorCount += specialBatch.length;
+            }
+            specialBatch = [];
+          }
           continue;
         }
 
@@ -827,8 +884,20 @@ export default function EstimationDetail() {
             apiErrorCount += batch.length;
         }
       }
+      
+      // Process remaining special batch
+      if (specialBatch.length > 0) {
+        try {
+            await createSpecialItemRequestsBatch(estimationId, specialBatch);
+            importedCount += specialBatch.length;
+        } catch (e) {
+            console.error("Failed to import final special batch", e);
+            apiErrorCount += specialBatch.length;
+        }
+      }
 
       await fetchLines();
+      await fetchSpecialItemRequests(); // Refresh special items too
       setIsImporting(false);
       // Prepare banner and inline message
       if (importedCount === 0) {

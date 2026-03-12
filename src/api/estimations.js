@@ -63,6 +63,11 @@ export const createSpecialItemRequest = async (estimationId, data) => {
   return res.data;
 };
 
+export const createSpecialItemRequestsBatch = async (estimationId, requests) => {
+  const res = await apiClient.post(`/estimations/${estimationId}/special-item-requests/batch`, { requests });
+  return res.data;
+};
+
 export const approveSpecialItemRequest = async (requestId) => {
   const res = await apiClient.post(`/estimations/special-item-requests/${requestId}/approve`);
   return res.data;
